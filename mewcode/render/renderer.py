@@ -283,10 +283,13 @@ class Renderer:
         cls_name = type(ev).__name__
 
         if cls_name == "IterationStart":
-            sys.stdout.write(
-                f"── 迭代 {ev.iteration}/{ev.max_iterations} ──\n"
-            )
-            sys.stdout.flush()
+            # 用户反馈：进度行噪音过多，本阶段静默
+            # 如需恢复显示：取消下面注释
+            # sys.stdout.write(
+            #     f"── 迭代 {ev.iteration}/{ev.max_iterations} ──\n"
+            # )
+            # sys.stdout.flush()
+            pass
 
         elif cls_name == "IterationEnd":
             pass  # 静默——仅用于事件流完整性
@@ -326,7 +329,7 @@ class Renderer:
             ]
             if ev.thinking_tokens is not None:
                 parts.append(f"思考 {ev.thinking_tokens} tokens")
-            parts.append(f"{ev.iterations} 轮")
+            # 用户反馈：去掉末尾的 "N 轮"
             sys.stdout.write(" · ".join(parts) + "\n")
             sys.stdout.flush()
 
