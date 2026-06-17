@@ -50,6 +50,7 @@ class WriteTool(Tool):
         "required": ["path", "content"],
     }
     danger_level = DangerLevel.SAFE
+    readonly = False  # 有副作用：写文件
 
     async def execute(self, params: dict, sandbox: Sandbox) -> ToolResult:
         try:

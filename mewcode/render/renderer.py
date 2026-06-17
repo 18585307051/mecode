@@ -270,6 +270,66 @@ class Renderer:
         sys.stdout.write(" · ".join(parts) + "\n")
         sys.stdout.flush()
 
+    # ---------- Agent 事件订阅（第三阶段） ----------
+
+    def on_agent_event(self, ev) -> None:
+        """订阅 AgentEvent，按事件类型输出终端文本。
+
+        这是 Renderer 的统一入口——chat.engine 通过 _emit(renderer, ev)
+        调用此方法，内部按 isinstance 分派。所有输出沿用朴素
+        sys.stdout.write 策略，不用 rich Live。
+        """
+        # isinstance 分派（避免循环 import，用 duck typing 检查类型名）
+        cls_name = type(ev).__name__
+
+        if cls_name == "IterationStart":
+            sys.stdout.write(
+                f"── 迭代 {ev.iteration}/{ev.max_iterations} ──\n"
+            )
+            sys.stdout.flush()
+
+        elif cls_name == "IterationEnd":
+            pass  # 静默——仅用于事件流完整性
+
+        elif cls_name == "ToolBatchStart":
+            pass  # 静默——避免噪音
+
+        elif cls_name == "ToolCall":
+            summary = ev.summary
+            if len(summary) > 80:
+                summary = summary[:77] + "..."
+            sys.stdout.write(f"▸ {ev.name}({summary})\n")
+            sys.stdout.flush()
+
+        elif cls_name == "ToolResultEvent":
+            icon = "✓" if ev.success else "✗"
+            sys.stdout.write(f"  {icon} {ev.name}: {ev.summary}\n")
+            sys.stdout.flush()
+
+        elif cls_name == "Stopped":
+            reason_map = {
+                "natural": "",
+                "max_iterations": "（已达迭代上限）",
+                "user_cancel": "（已取消）",
+                "unknown_tools": "（连续调用未知工具，已停止）",
+                "error": "（流出错）",
+            }
+            msg = reason_map.get(ev.reason, "")
+            if msg:
+                sys.stdout.write(f"{msg}\n")
+                sys.stdout.flush()
+
+        elif cls_name == "UsageTotal":
+            parts = [
+                f"↑ {ev.input_tokens} tokens",
+                f"↓ {ev.output_tokens} tokens",
+            ]
+            if ev.thinking_tokens is not None:
+                parts.append(f"思考 {ev.thinking_tokens} tokens")
+            parts.append(f"{ev.iterations} 轮")
+            sys.stdout.write(" · ".join(parts) + "\n")
+            sys.stdout.flush()
+
     # ---------- 中断收尾 ----------
 
     def abort_streaming(self) -> None:

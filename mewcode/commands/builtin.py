@@ -109,6 +109,20 @@ async def _handle_provider(ctx: CommandContext) -> CommandResult:
     return CommandResult()
 
 
+async def _handle_plan(ctx: CommandContext) -> CommandResult:
+    """/plan：切换到 Plan Mode（只读工具）。"""
+    ctx.session.mode = "plan"
+    ctx.renderer.print_info("📋 Plan Mode：只读工具（read / glob / search）")
+    return CommandResult()
+
+
+async def _handle_do(ctx: CommandContext) -> CommandResult:
+    """/do：切回执行模式（全部工具）。"""
+    ctx.session.mode = "do"
+    ctx.renderer.print_info("🔧 执行模式：全部工具")
+    return CommandResult()
+
+
 # ---------- 一次性注册 ----------
 
 
@@ -160,5 +174,21 @@ def register_builtins() -> None:
             aliases=(),
             description="/provider <name> — 切换供应商（清空历史）",
             handler=_handle_provider,
+        )
+    )
+    register(
+        Command(
+            name="plan",
+            aliases=(),
+            description="切换到 Plan Mode（只读工具）",
+            handler=_handle_plan,
+        )
+    )
+    register(
+        Command(
+            name="do",
+            aliases=(),
+            description="切回执行模式（全部工具）",
+            handler=_handle_do,
         )
     )

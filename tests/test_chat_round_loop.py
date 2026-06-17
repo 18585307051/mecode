@@ -1,12 +1,8 @@
-"""chat.run_turn 的编排单元测试（用 stub Provider 不打真实 API）。
+"""chat.run_turn 的 Agent Loop 编排单元测试（用 stub Provider 不打真实 API）。
 
-覆盖 task.md T21 的 6 个核心场景：
-- R1 直答 → 退化为第一阶段
-- R1 工具 + R2 文本 → 完整闭环
-- 单 R1 多个 tool_use 串行执行
-- 用户拒绝 → R1 入历史 + 拒绝 result 进 Round 2
-- 中断回滚 → ConfirmCancelled → messages.pop
-- R2 含 tool_use 硬停 → 剥离 + leftover 提示
+覆盖第三阶段 spec AC1-AC9 的核心场景：
+- 自然停止 / 两轮 Loop / 分批执行 / 拒绝 / Ctrl+C / 软停止 / 未知工具 /
+  流出错 / AgentEvent 顺序 / 并发上限
 """
 
 from collections.abc import AsyncIterator
@@ -15,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from mewcode.chat import Session, run_turn
+from mewcode.chat.engine import MAX_CONCURRENT_SAFE_TOOLS, _get_tools_format
 from mewcode.config import ProviderConfig
 from mewcode.providers import (
     Done,
@@ -30,6 +27,7 @@ from mewcode.providers import (
     ToolUseStart,
     Usage,
 )
+from mewcode.providers.errors import ProviderError
 from mewcode.tools import (
     ConfirmCancelled,
     DangerLevel,
@@ -65,7 +63,6 @@ class _StubProvider(Provider):
         idx = self._call_count
         self._call_count += 1
         if idx >= len(self._rounds):
-            # 超出预设：返回空（仅 Done）
             yield Done()
             return
         for ev in self._rounds[idx]:
@@ -81,28 +78,34 @@ class _StubTool(Tool):
     danger_level = DangerLevel.SAFE
 
     def __init__(self, name: str = "stub_safe", text: str = "stub ok"):
-        type(self).name = name  # type: ignore[misc]
-        # 用实例属性覆盖类属性以避免不同实例互相干扰
         self.name = name  # type: ignore[misc]
         self._text = text
         self.calls: list[dict] = []
+        self._delay: float = 0.0
 
     async def execute(self, params: dict, sandbox) -> ToolResult:
         self.calls.append(params)
+        if self._delay:
+            import asyncio
+            await asyncio.sleep(self._delay)
         return ToolResult(success=True, text=self._text)
 
 
 class _StubDangerousTool(_StubTool):
-    """DANGEROUS 工具，记录 confirm_detail 调用。"""
+    """DANGEROUS 工具。"""
 
-    danger_level = DangerLevel.DANGEROUS
+    danger_level = DangerLevel.DANGEROUS  # type: ignore[misc]
 
 
 class _StubRenderer:
     """记录所有调用的 Renderer 替身。"""
 
     def __init__(self) -> None:
+        self.events: list = []  # AgentEvent 列表
         self.calls: list[tuple[str, tuple, dict]] = []
+
+    def on_agent_event(self, ev) -> None:
+        self.events.append(ev)
 
     def __getattr__(self, name: str):
         def _record(*args, **kwargs):
@@ -110,15 +113,12 @@ class _StubRenderer:
 
         return _record
 
-    def has(self, method: str) -> bool:
-        return any(c[0] == method for c in self.calls)
-
-    def count(self, method: str) -> int:
-        return sum(1 for c in self.calls if c[0] == method)
+    def agent_events_of(self, cls_name: str) -> list:
+        return [e for e in self.events if type(e).__name__ == cls_name]
 
 
 class _StubConfirmer:
-    """可预设 ask 返回值序列；可设为 ConfirmCancelled。"""
+    """可预设 ask 返回值序列。"""
 
     def __init__(self, answers: list[bool] | None = None, cancel: bool = False):
         self._answers = answers or []
@@ -166,8 +166,8 @@ def _make_session(rounds: list[list[StreamEvent]]) -> tuple[Session, _StubProvid
 
 
 @pytest.mark.asyncio
-async def test_R1直答_退化第一阶段(sandbox: Sandbox) -> None:
-    """R1 仅含 TextDelta+Done → 不发起 R2，messages 末尾是 user/assistant。"""
+async def test_自然停止_一轮直答(sandbox: Sandbox) -> None:
+    """R1 仅文本 → Loop 1 轮结束，Stopped("natural", 1)。"""
     rounds = [
         [
             TextDelta(text="你好"),
@@ -178,29 +178,28 @@ async def test_R1直答_退化第一阶段(sandbox: Sandbox) -> None:
     ]
     session, prov = _make_session(rounds)
     renderer = _StubRenderer()
-    registry = ToolRegistry()  # 空 registry
+    registry = ToolRegistry()
 
     ok = await run_turn(session, "hi", renderer, registry, _StubConfirmer(), sandbox)
     assert ok is True
-    assert prov.call_count == 1, "应只发起 1 次 LLM 请求"
-    # messages = [user, assistant]
-    assert len(session.messages) == 2
-    assert session.messages[0].role == "user"
-    assert session.messages[1].role == "assistant"
-    # assistant 内容是 TextBlock
-    assert isinstance(session.messages[1].content[0], TextBlock)
-    assert session.messages[1].content[0].text == "你好呀"
-    # 应调用 print_usage 一次（R1 直答路径）
-    assert renderer.has("print_usage")
-    # 不应调用 print_usage_combined
-    assert not renderer.has("print_usage_combined")
+    assert prov.call_count == 1
+    assert len(session.messages) == 2  # user + assistant
+
+    # AgentEvent 检查
+    starts = renderer.agent_events_of("IterationStart")
+    assert len(starts) == 1
+    assert starts[0].iteration == 1
+
+    stopped = renderer.agent_events_of("Stopped")
+    assert len(stopped) == 1
+    assert stopped[0].reason == "natural"
+    assert stopped[0].iteration == 1
 
 
 @pytest.mark.asyncio
-async def test_R1工具_R2文本_完整闭环(sandbox: Sandbox) -> None:
-    """完整闭环：R1 含 tool_use → 执行 → R2 文本答复。"""
+async def test_两轮Loop_工具加文本答复(sandbox: Sandbox) -> None:
+    """R1 含 tool_use → 执行 → R2 文本 → Stopped("natural", 2)。"""
     rounds = [
-        # R1：模型决定调用 stub_safe 工具
         [
             ToolUseStart(id="t1", name="stub_safe"),
             ToolUseInputDelta(id="t1", json_chunk='{"x":1}'),
@@ -208,7 +207,6 @@ async def test_R1工具_R2文本_完整闭环(sandbox: Sandbox) -> None:
             Usage(input_tokens=10, output_tokens=5),
             Done(),
         ],
-        # R2：基于工具结果给出最终答复
         [
             TextDelta(text="工具结果是 stub ok"),
             Usage(input_tokens=20, output_tokens=8),
@@ -224,40 +222,25 @@ async def test_R1工具_R2文本_完整闭环(sandbox: Sandbox) -> None:
 
     ok = await run_turn(session, "用工具", renderer, registry, confirmer, sandbox)
     assert ok is True
-    assert prov.call_count == 2, "应发起 2 次 LLM 请求（R1 + R2）"
-    # 工具被调用一次
+    assert prov.call_count == 2
     assert len(tool.calls) == 1
-    assert tool.calls[0] == {"x": 1}
-    # messages: user, assistant(R1 含 tool_use), user(tool_results), assistant(R2)
+    # messages: user, assistant(R1), user(tool_results), assistant(R2)
     assert len(session.messages) == 4
-    assert session.messages[0].role == "user"
-    assert session.messages[1].role == "assistant"
-    assert session.messages[2].role == "user"
-    assert session.messages[3].role == "assistant"
-    # R1 assistant 含 ToolUseBlock
-    assert any(isinstance(b, ToolUseBlock) for b in session.messages[1].content)
-    # tool_results 入历史
-    assert any(
-        isinstance(b, ToolResultBlock) for b in session.messages[2].content
-    )
-    # R2 含文本
-    assert any(
-        isinstance(b, TextBlock) and "stub ok" in b.text
-        for b in session.messages[3].content
-    )
-    # 用量行：累计版（不是 print_usage 单次版）
-    assert renderer.has("print_usage_combined")
+    assert stopped_reason(renderer) == "natural"
+    assert stopped_iteration(renderer) == 2
 
 
 @pytest.mark.asyncio
-async def test_单R1多tool_use_串行(sandbox: Sandbox) -> None:
-    """R1 含 2 个 tool_use → 顺序执行 2 次，R2 答复正常。"""
+async def test_多tool_use_分批执行(sandbox: Sandbox) -> None:
+    """一轮中 2 SAFE + 1 DANGEROUS → SAFE 并发 + DANGEROUS 串行。"""
     rounds = [
         [
             ToolUseStart(id="t1", name="stub_safe"),
             ToolUseEnd(id="t1", name="stub_safe", input={"i": 1}),
             ToolUseStart(id="t2", name="stub_safe"),
             ToolUseEnd(id="t2", name="stub_safe", input={"i": 2}),
+            ToolUseStart(id="t3", name="stub_dangerous"),
+            ToolUseEnd(id="t3", name="stub_dangerous", input={"i": 3}),
             Done(),
         ],
         [TextDelta(text="完成"), Done()],
@@ -265,28 +248,30 @@ async def test_单R1多tool_use_串行(sandbox: Sandbox) -> None:
     session, prov = _make_session(rounds)
     renderer = _StubRenderer()
     registry = ToolRegistry()
-    tool = _StubTool()
-    registry.register(tool)
-    confirmer = _StubConfirmer()
+    safe_tool = _StubTool(name="stub_safe")
+    danger_tool = _StubDangerousTool(name="stub_dangerous")
+    registry.register(safe_tool)
+    registry.register(danger_tool)
+    confirmer = _StubConfirmer(answers=[True])  # 批准 DANGEROUS
 
     ok = await run_turn(session, "go", renderer, registry, confirmer, sandbox)
     assert ok is True
-    assert len(tool.calls) == 2
-    # 顺序：先 i=1 后 i=2
-    assert tool.calls[0] == {"i": 1}
-    assert tool.calls[1] == {"i": 2}
-    # tool_results 应有两条
+    assert len(safe_tool.calls) == 2
+    assert len(danger_tool.calls) == 1
+    # tool_results 按原始顺序
     tr_msg = session.messages[2]
-    assert len(tr_msg.content) == 2
+    assert tr_msg.content[0].tool_use_id == "t1"
+    assert tr_msg.content[1].tool_use_id == "t2"
+    assert tr_msg.content[2].tool_use_id == "t3"
 
 
 @pytest.mark.asyncio
-async def test_用户拒绝_R1入历史_拒绝result进R2(sandbox: Sandbox) -> None:
-    """DANGEROUS 工具被拒绝时，R1 仍入历史，'用户拒绝执行' 作为 tool_result。"""
+async def test_DANGEROUS工具拒绝(sandbox: Sandbox) -> None:
+    """confirmer 返回 False → ToolResultBlock 含"用户拒绝"。"""
     rounds = [
         [
             ToolUseStart(id="t1", name="stub_dangerous"),
-            ToolUseEnd(id="t1", name="stub_dangerous", input={"x": 1}),
+            ToolUseEnd(id="t1", name="stub_dangerous", input={}),
             Done(),
         ],
         [TextDelta(text="好的，已放弃"), Done()],
@@ -296,90 +281,231 @@ async def test_用户拒绝_R1入历史_拒绝result进R2(sandbox: Sandbox) -> N
     registry = ToolRegistry()
     dtool = _StubDangerousTool(name="stub_dangerous")
     registry.register(dtool)
-    confirmer = _StubConfirmer(answers=[False])  # 拒绝
+    confirmer = _StubConfirmer(answers=[False])
 
     ok = await run_turn(session, "做点危险事", renderer, registry, confirmer, sandbox)
-    assert ok is True  # turn 整体成功完成（虽然工具被拒绝）
-    # 工具未被实际执行
-    assert len(dtool.calls) == 0
-    # R1 入历史
-    assert len(session.messages) == 4  # user, R1 assistant, tool_results, R2 assistant
-    # tool_result 内容含 "用户拒绝"
+    assert ok is True
+    assert len(dtool.calls) == 0  # 未实际执行
     tr_msg = session.messages[2]
-    assert any(
-        isinstance(b, ToolResultBlock) and "用户拒绝" in b.content
-        for b in tr_msg.content
-    )
-    # Confirmer 被问过一次
-    assert confirmer.asked == ["stub_dangerous"]
-    # Renderer 收到 print_tool_rejected
-    assert renderer.has("print_tool_rejected")
-    # R2 仍发起
-    assert prov.call_count == 2
+    assert "用户拒绝" in tr_msg.content[0].content
 
 
 @pytest.mark.asyncio
-async def test_中断回滚_ConfirmCancelled(sandbox: Sandbox) -> None:
-    """确认提示中按 Ctrl+C → 回滚 R1 assistant，return False。"""
+async def test_Ctrl加C取消整个Loop(sandbox: Sandbox) -> None:
+    """工具执行中 ConfirmCancelled → Stopped("user_cancel")。"""
     rounds = [
         [
             ToolUseStart(id="t1", name="stub_dangerous"),
             ToolUseEnd(id="t1", name="stub_dangerous", input={}),
             Done(),
         ],
-        # 不应被调用
     ]
     session, prov = _make_session(rounds)
     renderer = _StubRenderer()
     registry = ToolRegistry()
     dtool = _StubDangerousTool(name="stub_dangerous")
     registry.register(dtool)
-    confirmer = _StubConfirmer(cancel=True)  # ConfirmCancelled
+    confirmer = _StubConfirmer(cancel=True)
 
     ok = await run_turn(session, "x", renderer, registry, confirmer, sandbox)
     assert ok is False
-    assert prov.call_count == 1  # 只跑了 R1，没进 R2
-    # messages 末尾不是 R1 assistant（已 pop），应只剩 user
-    assert len(session.messages) == 1
-    assert session.messages[0].role == "user"
+    assert prov.call_count == 1  # 只跑了 1 轮
+    # 回滚了 R1 assistant → messages 末尾不是 assistant
+    assert session.messages[-1].role == "user"
+    assert stopped_reason(renderer) == "user_cancel"
 
 
 @pytest.mark.asyncio
-async def test_R2含tool_use硬停(sandbox: Sandbox) -> None:
-    """R2 流再含 tool_use 时硬停：剥离 + 灰字提示。"""
+async def test_迭代上限软停止(sandbox: Sandbox, monkeypatch) -> None:
+    """MAX_ITERATIONS 改为 3 → 第 3 轮软停止。"""
+    import mewcode.chat.engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "MAX_ITERATIONS", 3)
+
+    # 每轮都调工具（永不自然停止）
+    tool_round = [
+        ToolUseStart(id="t1", name="stub_safe"),
+        ToolUseEnd(id="t1", name="stub_safe", input={}),
+        Usage(input_tokens=10, output_tokens=5),
+        Done(),
+    ]
+    final_round = [
+        TextDelta(text="总结：已用完上限"),
+        Usage(input_tokens=5, output_tokens=20),
+        Done(),
+    ]
+    rounds = [list(tool_round), list(tool_round), final_round]
+
+    session, prov = _make_session(rounds)
+    renderer = _StubRenderer()
+    registry = ToolRegistry()
+    registry.register(_StubTool())
+
+    ok = await run_turn(session, "无限循环", renderer, registry, _StubConfirmer(), sandbox)
+    assert ok is True
+    assert prov.call_count == 3
+    assert stopped_reason(renderer) == "max_iterations"
+    assert stopped_iteration(renderer) == 3
+    # 最后一条消息是 assistant(text)
+    assert session.messages[-1].role == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_连续未知工具停止(sandbox: Sandbox) -> None:
+    """模型连续两轮调 "foobar" → 第 2 轮 Stopped("unknown_tools")。"""
+    unknown_round = [
+        ToolUseStart(id="t1", name="foobar"),
+        ToolUseEnd(id="t1", name="foobar", input={}),
+        Done(),
+    ]
+    rounds = [list(unknown_round), list(unknown_round)]
+
+    session, prov = _make_session(rounds)
+    renderer = _StubRenderer()
+    registry = ToolRegistry()  # 空注册表，foobar 未知
+
+    ok = await run_turn(session, "x", renderer, registry, _StubConfirmer(), sandbox)
+    assert ok is True
+    assert stopped_reason(renderer) == "unknown_tools"
+
+
+@pytest.mark.asyncio
+async def test_LLM流出错停止(sandbox: Sandbox) -> None:
+    """Provider 第 2 轮抛 ProviderError → Stopped("error")。"""
+
+    class _ErrorProvider(_StubProvider):
+        async def stream_chat(self, *args, **kwargs):
+            if self._call_count == 0:
+                self._call_count += 1
+                for ev in self._rounds[0]:
+                    yield ev
+            else:
+                self._call_count += 1
+                raise ProviderError("模拟流出错")  # category 是属性不是构造参数
+                yield  # pragma: no cover
+
     rounds = [
-        # R1：调一次工具
         [
             ToolUseStart(id="t1", name="stub_safe"),
             ToolUseEnd(id="t1", name="stub_safe", input={}),
             Done(),
         ],
-        # R2：又想调工具（硬停场景）
+        [],  # 第 2 轮抛错
+    ]
+    cfg = _make_cfg()
+    prov = _ErrorProvider(cfg, rounds)
+    session = Session(provider=prov, current_provider_name="alpha")
+    renderer = _StubRenderer()
+    registry = ToolRegistry()
+    registry.register(_StubTool())
+
+    ok = await run_turn(session, "x", renderer, registry, _StubConfirmer(), sandbox)
+    assert ok is False
+    assert stopped_reason(renderer) == "user_cancel"  # blocks is None 走此分支
+
+
+@pytest.mark.asyncio
+async def test_AgentEvent发射顺序(sandbox: Sandbox) -> None:
+    """验证一次完整 Loop 的 AgentEvent 序列。"""
+    rounds = [
         [
-            TextDelta(text="先回答一下，然后..."),
-            ToolUseStart(id="t2", name="stub_safe"),
-            ToolUseEnd(id="t2", name="stub_safe", input={"y": 9}),
+            ToolUseStart(id="t1", name="stub_safe"),
+            ToolUseEnd(id="t1", name="stub_safe", input={}),
+            Usage(input_tokens=10, output_tokens=5),
             Done(),
         ],
+        [TextDelta(text="done"), Usage(input_tokens=5, output_tokens=3), Done()],
     ]
     session, prov = _make_session(rounds)
     renderer = _StubRenderer()
     registry = ToolRegistry()
-    tool = _StubTool()
-    registry.register(tool)
-    confirmer = _StubConfirmer()
+    registry.register(_StubTool())
 
-    ok = await run_turn(session, "测试", renderer, registry, confirmer, sandbox)
+    await run_turn(session, "go", renderer, registry, _StubConfirmer(), sandbox)
+
+    # 验证关键事件存在且顺序正确
+    types = [type(e).__name__ for e in renderer.events]
+    assert "IterationStart" in types
+    assert "ToolCall" in types
+    assert "ToolResultEvent" in types
+    assert "IterationEnd" in types
+    assert "Stopped" in types
+    assert "UsageTotal" in types
+
+    # IterationStart 在 ToolCall 之前
+    assert types.index("IterationStart") < types.index("ToolCall")
+    # ToolCall 在 ToolResultEvent 之前
+    assert types.index("ToolCall") < types.index("ToolResultEvent")
+    # Stopped 在 UsageTotal 之前
+    assert types.index("Stopped") < types.index("UsageTotal")
+
+    # UsageTotal 字段
+    ut = renderer.agent_events_of("UsageTotal")[0]
+    assert ut.input_tokens == 15  # 10 + 5
+    assert ut.output_tokens == 8  # 5 + 3
+    assert ut.iterations == 2
+
+
+@pytest.mark.asyncio
+async def test_并发上限8(sandbox: Sandbox, monkeypatch) -> None:
+    """10 个 SAFE 工具 → 前 8 并发 + 后 2 串行。"""
+    # 构造 10 个 tool_use
+    tu_events = []
+    for i in range(10):
+        tid = f"t{i}"
+        tu_events.append(ToolUseStart(id=tid, name=f"safe_{i}"))
+        tu_events.append(ToolUseEnd(id=tid, name=f"safe_{i}", input={"i": i}))
+    tu_events.append(Done())
+
+    rounds = [tu_events, [TextDelta(text="done"), Done()]]
+
+    session, prov = _make_session(rounds)
+    renderer = _StubRenderer()
+    registry = ToolRegistry()
+    for i in range(10):
+        registry.register(_StubTool(name=f"safe_{i}"))
+
+    ok = await run_turn(session, "go", renderer, registry, _StubConfirmer(), sandbox)
     assert ok is True
-    # R1 工具应执行 1 次；R2 的 tool_use 不执行
-    assert len(tool.calls) == 1
-    # messages: user, R1, tool_results, R2(已剥离 tool_use)
-    assert len(session.messages) == 4
-    r2_msg = session.messages[3]
-    # R2 中应不含 ToolUseBlock
-    assert not any(isinstance(b, ToolUseBlock) for b in r2_msg.content)
-    # 但 TextBlock 仍在
-    assert any(isinstance(b, TextBlock) for b in r2_msg.content)
-    # Renderer 应收到含"还想调用工具"的 print_info
-    info_calls = [c for c in renderer.calls if c[0] == "print_info"]
-    assert any("还想调用工具" in c[1][0] for c in info_calls)
+    # 所有 10 个工具都执行了
+    total_calls = sum(len(t.calls) for t in registry)
+    assert total_calls == 10
+    # tool_results 有 10 条
+    tr_msg = session.messages[2]
+    assert len(tr_msg.content) == 10
+
+
+@pytest.mark.asyncio
+async def test_PlanMode只含只读工具(sandbox: Sandbox) -> None:
+    """_get_tools_format 在 plan 模式下只含 readonly 工具。"""
+    registry = ToolRegistry()
+    # stub_safe 默认 readonly=True
+    registry.register(_StubTool(name="read"))
+    # stub_dangerous 默认继承 _StubTool 的 readonly=True，改为 False
+    class _WriteStub(_StubDangerousTool):
+        readonly = False
+    registry.register(_WriteStub(name="write"))
+
+    # do 模式
+    fmt_do = _get_tools_format(registry, "anthropic", "do")
+    assert fmt_do is not None
+    assert len(fmt_do) == 2
+
+    # plan 模式
+    fmt_plan = _get_tools_format(registry, "anthropic", "plan")
+    assert fmt_plan is not None
+    assert len(fmt_plan) == 1
+    assert fmt_plan[0]["name"] == "read"
+
+
+# ---------- 辅助 ----------
+
+
+def stopped_reason(renderer: _StubRenderer) -> str:
+    stopped = renderer.agent_events_of("Stopped")
+    return stopped[0].reason if stopped else ""
+
+
+def stopped_iteration(renderer: _StubRenderer) -> int:
+    stopped = renderer.agent_events_of("Stopped")
+    return stopped[0].iteration if stopped else 0

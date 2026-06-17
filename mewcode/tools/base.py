@@ -70,6 +70,10 @@ class Tool(ABC):
     parameters_schema: dict = {}
     # 子类覆盖：危险等级
     danger_level: str = DangerLevel.SAFE
+    # 子类覆盖：是否只读（无副作用）。Plan Mode 只允许 readonly=True 的工具。
+    # 与 danger_level 解耦：write/run 在第二阶段改为 SAFE（不需确认），
+    # 但仍有副作用，readonly=False。
+    readonly: bool = True
 
     @abstractmethod
     async def execute(self, params: dict, sandbox: "Sandbox") -> ToolResult:

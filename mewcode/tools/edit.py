@@ -55,6 +55,7 @@ class EditTool(Tool):
         "required": ["path", "old_text", "new_text"],
     }
     danger_level = DangerLevel.DANGEROUS
+    readonly = False  # 有副作用：改文件
 
     async def execute(self, params: dict, sandbox: Sandbox) -> ToolResult:
         try:

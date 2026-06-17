@@ -50,6 +50,7 @@ class RunTool(Tool):
         "required": ["command"],
     }
     danger_level = DangerLevel.SAFE
+    readonly = False  # 有副作用：执行命令
 
     # 允许测试通过实例属性 monkey-patch 覆盖超时（不改环境变量）
     timeout: float = DEFAULT_TIMEOUT
