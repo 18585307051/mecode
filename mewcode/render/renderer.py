@@ -298,10 +298,13 @@ class Renderer:
             pass  # 静默——避免噪音
 
         elif cls_name == "ToolCall":
+            # 工具自身的 render_call_summary 已经返回完整动词式描述
+            # （Read xxx / Wrote xxx / Edited xxx +N-M / Bash xxx /
+            # Glob xxx / Search xxx），直接打印，不再用 ▸ name(...) 包装
             summary = ev.summary
-            if len(summary) > 80:
-                summary = summary[:77] + "..."
-            sys.stdout.write(f"▸ {ev.name}({summary})\n")
+            if len(summary) > 120:
+                summary = summary[:117] + "..."
+            sys.stdout.write(f"{summary}\n")
             sys.stdout.flush()
 
         elif cls_name == "ToolResultEvent":

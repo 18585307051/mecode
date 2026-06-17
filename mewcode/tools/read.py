@@ -181,10 +181,13 @@ class ReadTool(Tool):
         path = params.get("path", "?")
         offset = params.get("offset")
         limit = params.get("limit")
-        suffix = ""
         if offset is not None or limit is not None:
-            suffix = f", offset={offset or 1}, limit={limit or 'all'}"
-        return f"path={path}{suffix}"
+            start = offset or 1
+            if limit:
+                end = start + limit - 1
+                return f"Read {path}, lines {start}-{end}"
+            return f"Read {path}, from line {start}"
+        return f"Read {path}"
 
     def render_result_summary(self, result: ToolResult) -> str:
         if not result.success:

@@ -136,7 +136,7 @@ class GlobTool(Tool):
     # ---------- UI 渲染 ----------
 
     def render_call_summary(self, params: dict) -> str:
-        return f"pattern={params.get('pattern', '?')}"
+        return f"Glob {params.get('pattern', '?')}"
 
     def render_result_summary(self, result: ToolResult) -> str:
         if not result.success:

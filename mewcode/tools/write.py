@@ -108,7 +108,7 @@ class WriteTool(Tool):
         path = params.get("path", "?")
         content = params.get("content", "")
         n = len(content) if isinstance(content, str) else 0
-        return f"path={path}, {n} chars"
+        return f"Wrote {path} ({n} chars)"
 
     def render_confirm_detail(self, params: dict) -> str:
         """确认提示：路径 + 内容前 20 行预览。"""

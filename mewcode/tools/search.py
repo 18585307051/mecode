@@ -156,12 +156,16 @@ class SearchTool(Tool):
 
     def render_call_summary(self, params: dict) -> str:
         pattern = str(params.get("pattern", ""))
-        file_glob = params.get("file_glob", "**/*")
+        file_glob = params.get("file_glob")
         is_literal = params.get("is_literal", False)
         if len(pattern) > 40:
             pattern = pattern[:37] + "..."
-        flag = " (literal)" if is_literal else ""
-        return f"pattern={pattern!r}, glob={file_glob}{flag}"
+        suffix = ""
+        if file_glob and file_glob != "**/*":
+            suffix += f" in {file_glob}"
+        if is_literal:
+            suffix += " (literal)"
+        return f"Search {pattern}{suffix}"
 
     def render_result_summary(self, result: ToolResult) -> str:
         if not result.success:

@@ -135,7 +135,7 @@ class RunTool(Tool):
         cmd = str(params.get("command", ""))
         if len(cmd) > _CMD_SUMMARY_MAX:
             cmd = cmd[: _CMD_SUMMARY_MAX - 3] + "..."
-        return cmd
+        return f"Bash {cmd}"
 
     def render_confirm_detail(self, params: dict) -> str:
         cmd = params.get("command", "?")

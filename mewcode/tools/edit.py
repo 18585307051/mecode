@@ -151,7 +151,18 @@ class EditTool(Tool):
 
     def render_call_summary(self, params: dict) -> str:
         path = params.get("path", "?")
-        return f"path={path}"
+        old_text = params.get("old_text", "")
+        new_text = params.get("new_text", "")
+        # 计算 +N-M（add/remove 行数）
+        old_lines = old_text.count("\n") + (1 if old_text else 0)
+        new_lines = new_text.count("\n") + (1 if new_text else 0)
+        added = max(0, new_lines - old_lines)
+        removed = max(0, old_lines - new_lines)
+        # 如果行数相同，按"修改"展示——给 +X-X 表示修改 X 行
+        if added == 0 and removed == 0 and old_text != new_text:
+            n = max(old_lines, 1)
+            return f"Edited {path} +{n}-{n}"
+        return f"Edited {path} +{added}-{removed}"
 
     def render_confirm_detail(self, params: dict) -> str:
         """确认提示：展示路径 + difflib.unified_diff 的 diff 文本。
