@@ -22,12 +22,18 @@ _PREVIEW_LINES = 20  # 确认提示展示的内容前 N 行
 
 
 class WriteTool(Tool):
-    """写入文件（不存在则新建，存在则整体覆盖）。"""
+    """写入文件（不存在则新建，存在则整体覆盖）。
+
+    注：本阶段策略调整——write 默认 SAFE 自动执行（用户在 spec Q3 之后
+    放宽了确认要求，只保留 edit 一个 DANGEROUS 工具）。沙盒仍然有效，
+    越界路径会被 Sandbox.resolve 拒绝。如需恢复确认，把 danger_level
+    改回 DangerLevel.DANGEROUS 即可。
+    """
 
     name = "write"
     description = (
         "写入文件到工作目录。文件不存在则新建（含必要的父目录），存在则"
-        "整体覆盖。文件以 UTF-8 编码写入。执行前需要用户确认。"
+        "整体覆盖。文件以 UTF-8 编码写入。自动执行不需用户确认。"
     )
     parameters_schema = {
         "type": "object",
@@ -43,7 +49,7 @@ class WriteTool(Tool):
         },
         "required": ["path", "content"],
     }
-    danger_level = DangerLevel.DANGEROUS
+    danger_level = DangerLevel.SAFE
 
     async def execute(self, params: dict, sandbox: Sandbox) -> ToolResult:
         try:

@@ -25,13 +25,19 @@ _CMD_SUMMARY_MAX = 60
 
 
 class RunTool(Tool):
-    """在工作目录下用系统 shell 执行一条命令。"""
+    """在工作目录下用系统 shell 执行一条命令。
+
+    注：本阶段策略调整——run 默认 SAFE 自动执行（用户在 spec Q3 之后
+    放宽了确认要求，只保留 edit 一个 DANGEROUS 工具）。沙盒以 sandbox.cwd
+    限制子进程工作目录；超时 60s 兜底。如需恢复确认，把 danger_level
+    改回 DangerLevel.DANGEROUS 即可。
+    """
 
     name = "run"
     description = (
         "在工作目录下用系统 shell 执行一条命令，60 秒超时。返回 stdout、"
         "stderr 与退出码。stdout+stderr 总输出超过 32KB 时按字节截断。"
-        "执行前需要用户确认。"
+        "自动执行不需用户确认。"
     )
     parameters_schema = {
         "type": "object",
@@ -43,7 +49,7 @@ class RunTool(Tool):
         },
         "required": ["command"],
     }
-    danger_level = DangerLevel.DANGEROUS
+    danger_level = DangerLevel.SAFE
 
     # 允许测试通过实例属性 monkey-patch 覆盖超时（不改环境变量）
     timeout: float = DEFAULT_TIMEOUT
