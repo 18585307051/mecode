@@ -88,6 +88,7 @@ class Provider(ABC):
         messages: list[Message],
         thinking: bool,
         tools_format: list[dict] | None = None,
+        system: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """发起一次流式对话。
 
@@ -97,6 +98,9 @@ class Provider(ABC):
             tools_format: 已按当前协议格式序列化的工具元信息列表；
                 None 或空列表表示本次请求不携带 tools 字段。
                 由 chat 层从 ToolRegistry.to_xxx_format() 取出后传入。
+            system:       系统提示（spec 第二阶段引入）。Anthropic 协议
+                走请求体顶层 `system` 字段；OpenAI 协议在 messages
+                头部插入 role=system 消息。None 时不携带。
 
         Returns:
             异步迭代器，按"事件流约定"产出 StreamEvent。

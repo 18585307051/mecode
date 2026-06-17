@@ -60,6 +60,7 @@ class _StubProvider(Provider):
         messages: list[Message],
         thinking: bool,
         tools_format: list[dict] | None = None,
+        system: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         idx = self._call_count
         self._call_count += 1

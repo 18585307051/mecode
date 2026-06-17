@@ -35,12 +35,15 @@ class Session:
         current_provider_name: 当前供应商在 AppConfig.providers 中的 key，
             用于 /providers 命令标记当前生效项、/provider <name> 切换时
             同步记录。
+        system_prompt:         系统提示（spec 第二阶段引入）。启动时一次
+            构造，每次 LLM 请求都带上。空字符串表示不发送 system 字段。
     """
 
     provider: Provider
     messages: list[Message] = field(default_factory=list)
     thinking_enabled: bool = False
     current_provider_name: str = ""
+    system_prompt: str = ""
 
     def append_user_text(self, text: str) -> None:
         """把一条用户文本消息追加到历史。"""

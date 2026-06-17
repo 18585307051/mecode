@@ -171,15 +171,23 @@ def main() -> int:
     try:
         default_cfg = app_config.providers[app_config.default]
         provider = build_provider(default_cfg)
-        session = Session(
-            provider=provider,
-            current_provider_name=app_config.default,
-        )
         # 第二阶段：构造工具系统三件套
         registry = ToolRegistry()
         register_builtins(registry)
         sandbox = Sandbox(cwd=Path.cwd())
         confirmer = Confirmer()
+        # 构造环境感知的 system prompt（让模型知道 Win/Linux、shell 等）
+        from mewcode.system_prompt import build_system_prompt
+
+        sys_prompt = build_system_prompt(
+            cwd=sandbox.cwd,
+            tools=sorted(t.name for t in registry),
+        )
+        session = Session(
+            provider=provider,
+            current_provider_name=app_config.default,
+            system_prompt=sys_prompt,
+        )
     except Exception:
         renderer.print_exception()
         return 2

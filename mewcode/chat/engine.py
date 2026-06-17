@@ -255,6 +255,7 @@ async def _consume_round(
         session.messages,
         session.thinking_enabled,
         tools_format=tools_format,
+        system=session.system_prompt or None,
     )
 
     # 累积状态

@@ -31,6 +31,7 @@ class _StubProvider(Provider):
         self,
         messages: list[Message],
         thinking: bool,
+        **kwargs,
     ) -> AsyncIterator[StreamEvent]:
         if False:  # pragma: no cover - 让函数成为异步生成器
             yield

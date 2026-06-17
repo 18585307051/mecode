@@ -129,6 +129,7 @@ class AnthropicProvider(Provider):
         messages: list[Message],
         thinking: bool,
         tools_format: list[dict] | None = None,
+        system: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         url = f"{self._config.base_url.rstrip('/')}/v1/messages"
         headers = {
@@ -143,6 +144,9 @@ class AnthropicProvider(Provider):
             "stream": True,
             "messages": _serialize_messages_anthropic(messages),
         }
+        if system:
+            # Anthropic 协议：system 走请求体顶层字段，不在 messages 内
+            body["system"] = system
         if thinking:
             body["thinking"] = {
                 "type": "enabled",

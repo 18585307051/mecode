@@ -36,6 +36,7 @@ class _StubProvider(Provider):
         self,
         messages: list[Message],
         thinking: bool,
+        **kwargs,
     ) -> AsyncIterator[StreamEvent]:
         if False:  # pragma: no cover
             yield

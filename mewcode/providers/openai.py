@@ -124,6 +124,7 @@ class OpenAIProvider(Provider):
         messages: list[Message],
         thinking: bool,  # 本协议忽略此参数
         tools_format: list[dict] | None = None,
+        system: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         url = f"{self._config.base_url.rstrip('/')}/v1/chat/completions"
         headers = {
@@ -131,12 +132,17 @@ class OpenAIProvider(Provider):
             "content-type": "application/json",
         }
 
+        # OpenAI 协议：system 通过 messages[0] = {role:"system", content:...} 表达
+        serialized = _serialize_messages_openai(messages)
+        if system:
+            serialized = [{"role": "system", "content": system}] + serialized
+
         body: dict = {
             "model": self._config.model,
             "stream": True,
             # include_usage=True 让兼容后端在最后一帧返回 usage 信息
             "stream_options": {"include_usage": True},
-            "messages": _serialize_messages_openai(messages),
+            "messages": serialized,
         }
         if tools_format:
             body["tools"] = tools_format
