@@ -38,6 +38,8 @@ class RunTool(Tool):
         "在工作目录下用系统 shell 执行一条命令，60 秒超时。返回 stdout、"
         "stderr 与退出码。stdout+stderr 总输出超过 32KB 时按字节截断。"
         "自动执行不需用户确认。"
+        "优先使用 read / glob / search 等专用工具读取信息，"
+        "而非通过 run 调用 cat / dir / grep 等命令。"
     )
     parameters_schema = {
         "type": "object",

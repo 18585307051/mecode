@@ -100,11 +100,18 @@ class Usage:
         output_tokens:   输出 token 数。
         thinking_tokens: 思考 token 数；后端未返回或不适用时为 None，
                          此时 Renderer 应跳过该项不显示。
+        cache_creation_input_tokens: 本次写入 prompt cache 的 token 数。
+            spec F8 第四阶段引入。仅 Anthropic 协议解析；OpenAI 协议
+            保持 None。None 表示"未知/不适用"，0 表示"明确无缓存写入"。
+        cache_read_input_tokens: 本次从 prompt cache 读取的 token 数。
+            语义同上。命中缓存时此值 > 0，可大幅降低实际计费 input_tokens。
     """
 
     input_tokens: int
     output_tokens: int
     thinking_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
+    cache_read_input_tokens: int | None = None
 
 
 @dataclass(frozen=True)

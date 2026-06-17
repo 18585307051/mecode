@@ -35,6 +35,7 @@ class EditTool(Tool):
         "在文件中按字节精确匹配 old_text 并替换为 new_text。要求 old_text "
         "在文件中出现且仅出现一次（否则报错请求更多上下文）。"
         "执行前需要用户确认。"
+        "调用前必须已经在本会话中 read 过此文件以确认原文，避免按错位置替换。"
     )
     parameters_schema = {
         "type": "object",

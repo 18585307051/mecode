@@ -38,6 +38,7 @@ class ReadTool(Tool):
         "读取工作目录内一个文本文件的内容。可选 offset（1-based 起始行）"
         "与 limit（读取行数）。文件超过 256KB 时按字节截断并标注。"
         "仅支持 UTF-8 文本文件；不支持二进制或非 UTF-8 编码文件。"
+        "使用 edit 之前必先用 read 确认原文片段，避免按错位置替换。"
     )
     parameters_schema = {
         "type": "object",

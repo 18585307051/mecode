@@ -71,6 +71,27 @@ class ToolRegistry:
             for t in self._tools.values()
         ]
 
+    def to_anthropic_format_with_cache(self) -> list[dict]:
+        """与 to_anthropic_format 行为相同，但最后一项含 cache_control。
+
+        spec F4 / D2：Anthropic 协议的 tools 数组也支持 cache_control。
+        把"breakpoint"加在最后一项上，标记到此位置以前的所有工具描述都
+        进入 prompt cache。
+
+        Anthropic 的 cache_control 限制最多 4 个 breakpoint；本方法只占
+        用 1 个（tools 末尾），与 system 字段的 1 个共 2 个，仍有余量。
+
+        Returns:
+            带 cache_control 的工具列表；空列表时直接返回（不需要标记）。
+        """
+        items = self.to_anthropic_format()
+        if items:
+            items[-1] = {
+                **items[-1],
+                "cache_control": {"type": "ephemeral"},
+            }
+        return items
+
     def to_openai_format(self) -> list[dict]:
         """把所有工具序列化为 OpenAI /v1/chat/completions 的 tools 字段格式。
 

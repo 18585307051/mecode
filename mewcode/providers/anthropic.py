@@ -145,22 +145,37 @@ class AnthropicProvider(Provider):
             "messages": _serialize_messages_anthropic(messages),
         }
         if system:
-            # Anthropic 协议：system 走请求体顶层字段，不在 messages 内
-            body["system"] = system
+            # Anthropic 协议：system 走请求体顶层字段。
+            # 第四阶段（spec F4 / D1）：升级为列表形式，最后一项加
+            # cache_control={"type":"ephemeral"} 把整段 system 纳入
+            # prompt cache，避免每次重复计费。
+            body["system"] = [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
         if thinking:
             body["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": _THINKING_BUDGET,
             }
         if tools_format:
+            # tools_format 由 chat 层用 ToolRegistry.to_anthropic_format_with_cache()
+            # 生成，最后一项已经含 cache_control（spec F4 / D2）。
             body["tools"] = tools_format
 
         # ----------------- 累积状态 -----------------
         # input_tokens 在 message_start 时拿到，output_tokens 来自 message_delta。
         # thinking_tokens 多数后端不单独返回，保持 None；详见前一版的注释。
+        # cache_creation/read：第四阶段新增（spec F8），从 message_start 与
+        # message_delta 的 usage 中提取，None 表示后端未返回。
         input_tokens = 0
         output_tokens = 0
         thinking_tokens: int | None = None
+        cache_creation_input_tokens: int | None = None
+        cache_read_input_tokens: int | None = None
 
         # tool_use 累积：index → {"id":..., "name":..., "args": <累计 JSON 字符串>}
         # 同一时刻可能有多个 tool_use 块并发存在（虽然实测 Anthropic 是按 index 串行），
@@ -189,12 +204,19 @@ class AnthropicProvider(Provider):
 
                 event = frame.event
 
-                # message_start：抽取 input_tokens
+                # message_start：抽取 input_tokens 与 cache 字段
                 if event == "message_start":
                     msg = data_obj.get("message", {})
                     usage = msg.get("usage", {})
                     if isinstance(usage.get("input_tokens"), int):
                         input_tokens = usage["input_tokens"]
+                    # spec F8：缓存命中字段（None 表示后端未返回）
+                    cc = usage.get("cache_creation_input_tokens")
+                    if isinstance(cc, int):
+                        cache_creation_input_tokens = cc
+                    cr = usage.get("cache_read_input_tokens")
+                    if isinstance(cr, int):
+                        cache_read_input_tokens = cr
                     continue
 
                 # content_block_start：可能是 text / thinking / tool_use 块开始
@@ -265,11 +287,18 @@ class AnthropicProvider(Provider):
                     # text / thinking 块的 stop 直接忽略
                     continue
 
-                # message_delta：抽取 output_tokens
+                # message_delta：抽取 output_tokens 与 cache 字段
                 if event == "message_delta":
                     usage = data_obj.get("usage", {})
                     if isinstance(usage.get("output_tokens"), int):
                         output_tokens = usage["output_tokens"]
+                    # 部分后端在 message_delta 才返回 cache 字段
+                    cc = usage.get("cache_creation_input_tokens")
+                    if isinstance(cc, int):
+                        cache_creation_input_tokens = cc
+                    cr = usage.get("cache_read_input_tokens")
+                    if isinstance(cr, int):
+                        cache_read_input_tokens = cr
                     continue
 
                 # message_stop：发 Usage（如有数据）+ Done，标记结束但不退出循环
@@ -278,6 +307,8 @@ class AnthropicProvider(Provider):
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
                         thinking_tokens=thinking_tokens,
+                        cache_creation_input_tokens=cache_creation_input_tokens,
+                        cache_read_input_tokens=cache_read_input_tokens,
                     )
                     yield Done()
                     finished = True

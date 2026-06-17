@@ -59,6 +59,7 @@ from mewcode.providers import (
     Usage,
 )
 from mewcode.render import Renderer
+from mewcode.system_prompt import build_plan_reminder, inject_into_user_text
 from mewcode.tools import (
     ConfirmCancelled,
     Confirmer,
@@ -413,8 +414,12 @@ async def _consume_round(
             registry, session.provider.protocol, session.mode
         )
 
+    # 第四阶段（spec F6 / F7 / D6）：构造临时 messages 副本注入 reminder。
+    # session.messages 保持干净的真实对话历史；reminder 仅在本次请求生效。
+    messages_to_send = _inject_reminders(session)
+
     stream = session.provider.stream_chat(
-        session.messages,
+        messages_to_send,
         session.thinking_enabled,
         tools_format=tools_format,
         system=session.system_prompt or None,
@@ -551,7 +556,9 @@ def _get_tools_format(
 ) -> list[dict] | None:
     """按 session.mode 过滤工具并按协议格式序列化。
 
-    spec F6 / D7：Plan Mode 物理隔离——tools_format 只含 SAFE 工具。
+    spec F6 / D7：Plan Mode 物理隔离——tools_format 只含 readonly 工具。
+    spec F4 / D2：Anthropic 协议下最后一项加 cache_control，把整个 tools
+    数组纳入 prompt cache。
     """
     if mode == "plan":
         tools = [t for t in registry if t.readonly]
@@ -562,7 +569,7 @@ def _get_tools_format(
         return None
 
     if protocol == "anthropic":
-        return [
+        items = [
             {
                 "name": t.name,
                 "description": t.description,
@@ -570,6 +577,12 @@ def _get_tools_format(
             }
             for t in tools
         ]
+        # 最后一项加 cache_control 作为 cache breakpoint
+        items[-1] = {
+            **items[-1],
+            "cache_control": {"type": "ephemeral"},
+        }
+        return items
     else:  # openai
         return [
             {
@@ -609,3 +622,66 @@ def _emit_usage(
             iterations=iterations,
         ),
     )
+
+
+def _inject_reminders(session: Session) -> list:
+    """构造临时 messages 副本，按 session.mode 注入 <system-reminder>。
+
+    spec F6 / F7 / D6：
+    - Plan Mode：递增 plan_turn_count，按节奏（首轮+每 5 轮）注入完整
+      reminder，其余轮注入精简 reminder。注入位置是当前 turn 的 user
+      消息开头（spec D4 拼接到 TextBlock 文本前）。
+    - Do Mode：重置 plan_turn_count=0，不注入。
+
+    本函数不修改 session.messages（spec D6 模块边界），返回的副本只对
+    当前请求生效。
+    """
+    messages_copy = list(session.messages)
+
+    if session.mode != "plan":
+        # Do Mode：重置计数器，原样返回
+        session.plan_turn_count = 0
+        return messages_copy
+
+    # Plan Mode：判断当前 turn 末尾是否是 user 消息（理论上 _agent_loop
+    # 在每次 _consume_round 前已 append 了 user 或 tool_results）
+    if not messages_copy:
+        return messages_copy
+
+    last = messages_copy[-1]
+    # 仅在末尾是"用户文本输入"时注入；tool_results（也是 role=user）不注入
+    # 区分方法：纯 TextBlock 列表 → 用户文本；含 ToolResultBlock → 工具反馈
+    from mewcode.providers import TextBlock as _TB
+    from mewcode.providers import ToolResultBlock as _TRB
+
+    if last.role != "user":
+        return messages_copy
+    if any(isinstance(b, _TRB) for b in last.content):
+        # 这是 tool_results，不算"轮"，不注入也不递增计数器
+        return messages_copy
+
+    # 是用户文本输入：递增计数器，构造 reminder
+    session.plan_turn_count += 1
+    reminder = build_plan_reminder(session.plan_turn_count)
+    if not reminder:
+        return messages_copy
+
+    # 找到 last.content 中第一个 TextBlock，把 reminder 拼到其文本开头
+    new_blocks = []
+    injected = False
+    for b in last.content:
+        if not injected and isinstance(b, _TB):
+            new_blocks.append(_TB(text=inject_into_user_text(reminder, b.text)))
+            injected = True
+        else:
+            new_blocks.append(b)
+
+    if not injected:
+        # 极少见：last.content 全部不是 TextBlock，不注入
+        return messages_copy
+
+    # 用新 Message 替换最后一条（Message 是 frozen，要构造新对象）
+    from mewcode.providers import Message as _Msg
+
+    messages_copy[-1] = _Msg(role="user", content=new_blocks)
+    return messages_copy

@@ -42,6 +42,10 @@ class Session:
             - "do"   执行模式，全部 6 个工具可用
             - "plan" 计划模式，只读工具（read/glob/search）可用
             /clear 与 /provider 切换时重置为 "do"。
+        plan_turn_count:       自切换到 plan 模式后已经发起的轮数（1-based）。
+            spec F7 / D7 第四阶段引入：用于决定 reminder 注入完整版还是
+            精简版。Do Mode 下保持 0；切到 Plan 后每次 _consume_round 递
+            增；切回 Do 或 /clear / /provider 时重置为 0。
     """
 
     provider: Provider
@@ -50,6 +54,7 @@ class Session:
     current_provider_name: str = ""
     system_prompt: str = ""
     mode: Literal["do", "plan"] = "do"
+    plan_turn_count: int = 0
 
     def append_user_text(self, text: str) -> None:
         """把一条用户文本消息追加到历史。"""
@@ -76,10 +81,12 @@ class Session:
     def clear(self) -> None:
         """清空消息历史。供 /clear 命令与 switch_provider 调用。
 
-        同时重置 mode 为 "do"（spec F6）。
+        同时重置 mode 为 "do"（spec F6）与 plan_turn_count 为 0
+        （spec F7）。
         """
         self.messages.clear()
         self.mode = "do"
+        self.plan_turn_count = 0
 
     def switch_provider(self, provider: Provider, name: str = "") -> None:
         """切换 Provider 实例并清空消息历史。
@@ -94,3 +101,4 @@ class Session:
             self.current_provider_name = name
         self.messages.clear()
         self.mode = "do"
+        self.plan_turn_count = 0
