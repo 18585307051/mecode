@@ -1,0 +1,33 @@
+# MewCode 配置文件样例
+#
+# 使用方法：
+#   1. 复制本文件为 mewcode.yaml
+#   2. 填入真实的 api_key
+#   3. 在含 mewcode.yaml 的目录下执行 `mewcode` 启动
+#
+# mewcode.yaml 已被 .gitignore 屏蔽，不会被提交。
+#
+# 字段说明：
+#   default       —— 启动时使用哪个供应商（必须是 providers 中的一个 key）
+#   providers.*   —— 命名供应商列表，每项包含以下四个核心字段：
+#     protocol    —— 走哪种 wire protocol，目前支持 "anthropic" / "openai"
+#     model       —— 模型名，会原样传给后端
+#     base_url    —— 请求基础 URL（不含路径，路径由 Provider 自动拼接）
+#     api_key     —— 鉴权用的密钥
+
+default: deepseek-anthropic
+
+providers:
+  # DeepSeek 借壳 Anthropic 协议端点
+  deepseek-anthropic:
+    protocol: anthropic
+    model: deepseek-v4-pro[1m]
+    base_url: https://api.deepseek.com/anthropic
+    api_key: sk-your-key-here
+
+  # DeepSeek 原生 OpenAI 协议端点
+  deepseek-openai:
+    protocol: openai
+    model: deepseek-chat
+    base_url: https://api.deepseek.com
+    api_key: sk-your-key-here

@@ -1,0 +1,31 @@
+# MewCode 配置文件（含敏感凭据，禁止提交）
+mewcode.yaml
+
+# Python 缓存与构建产物
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# EasyCode 临时文件（截图剪贴板等），保留 settings.json
+.easycode/clipboard/
+.easycode/cache/
+.easycode/logs/
