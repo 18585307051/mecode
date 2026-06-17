@@ -73,10 +73,10 @@ class _StubSession:
         self.current_provider_name = name
 
     def append_user(self, text: str) -> None:
-        self.messages.append(Message(role="user", content=text))
+        self.messages.append(Message.text("user", text))
 
     def append_assistant(self, text: str) -> None:
-        self.messages.append(Message(role="assistant", content=text))
+        self.messages.append(Message.text("assistant", text))
 
     def clear(self) -> None:
         self.messages.clear()

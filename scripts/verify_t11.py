@@ -26,7 +26,7 @@ async def main() -> None:
     done_seen = False
 
     async for ev in prov.stream_chat(
-        [Message("user", "你好，用一句话自我介绍")],
+        [Message.text("user", "你好，用一句话自我介绍")],
         thinking=False,
     ):
         if isinstance(ev, TextDelta):

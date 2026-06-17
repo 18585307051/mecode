@@ -20,6 +20,7 @@ import json
 from collections.abc import AsyncIterator
 
 from mewcode.providers.base import Message, Provider
+from mewcode.providers.blocks import TextBlock
 from mewcode.providers.errors import StreamParseError
 from mewcode.providers.events import (
     Done,
@@ -36,6 +37,21 @@ _THINKING_BUDGET = 4096
 _ANTHROPIC_VERSION = "2023-06-01"
 
 
+def _serialize_messages_legacy(messages: list[Message]) -> list[dict]:
+    """T3 桥接：把 list[ContentBlock] 中所有 TextBlock 拼接还原为字符串。
+
+    第二阶段 Message.content 已升级为 list[ContentBlock]，但 T18 之前
+    Provider 仍按"纯文本字符串"思路构造请求体。本函数让纯对话场景
+    （只含 TextBlock）继续工作；遇到 ToolUseBlock / ToolResultBlock 等
+    暂时忽略（T18 实现完整协议序列化后会被替换）。
+    """
+    out: list[dict] = []
+    for m in messages:
+        text_parts = [b.text for b in m.content if isinstance(b, TextBlock)]
+        out.append({"role": m.role, "content": "".join(text_parts)})
+    return out
+
+
 class AnthropicProvider(Provider):
     """走 Anthropic /v1/messages 协议的 Provider 实现。"""
 
@@ -43,6 +59,7 @@ class AnthropicProvider(Provider):
         self,
         messages: list[Message],
         thinking: bool,
+        tools_format: list[dict] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         url = f"{self._config.base_url.rstrip('/')}/v1/messages"
         headers = {
@@ -55,15 +72,15 @@ class AnthropicProvider(Provider):
             "model": self._config.model,
             "max_tokens": _MAX_TOKENS,
             "stream": True,
-            "messages": [
-                {"role": m.role, "content": m.content} for m in messages
-            ],
+            "messages": _serialize_messages_legacy(messages),
         }
         if thinking:
             body["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": _THINKING_BUDGET,
             }
+        # tools_format 在 T18 完整支持；T3 桥接阶段暂不携带
+        # （即便外层传入也不放进请求体）。
 
         # 累积变量：input_tokens 在 message_start 时拿到，output_tokens
         # 来自 message_delta。

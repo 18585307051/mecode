@@ -38,7 +38,7 @@ async def main() -> None:
 
     print("\n>>> thinking 阶段：")
     async for ev in prov.stream_chat(
-        [Message("user", "证明素数有无穷多个，简要说明思路")],
+        [Message.text("user", "证明素数有无穷多个，简要说明思路")],
         thinking=True,
     ):
         if isinstance(ev, ThinkingDelta):

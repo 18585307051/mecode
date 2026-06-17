@@ -19,6 +19,7 @@ import json
 from collections.abc import AsyncIterator
 
 from mewcode.providers.base import Message, Provider
+from mewcode.providers.blocks import TextBlock
 from mewcode.providers.errors import StreamParseError
 from mewcode.providers.events import (
     Done,
@@ -29,6 +30,19 @@ from mewcode.providers.events import (
 from mewcode.transport import iter_sse_frames, stream_post
 
 
+def _serialize_messages_legacy(messages: list[Message]) -> list[dict]:
+    """T3 桥接：把 list[ContentBlock] 中所有 TextBlock 拼接还原为字符串。
+
+    本函数让纯对话场景在 Message.content 升级后继续工作；ToolUseBlock /
+    ToolResultBlock 等暂时忽略（T19 实现完整协议序列化后会被替换）。
+    """
+    out: list[dict] = []
+    for m in messages:
+        text_parts = [b.text for b in m.content if isinstance(b, TextBlock)]
+        out.append({"role": m.role, "content": "".join(text_parts)})
+    return out
+
+
 class OpenAIProvider(Provider):
     """走 OpenAI /v1/chat/completions 协议的 Provider 实现。"""
 
@@ -36,6 +50,7 @@ class OpenAIProvider(Provider):
         self,
         messages: list[Message],
         thinking: bool,  # 本协议忽略此参数
+        tools_format: list[dict] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         url = f"{self._config.base_url.rstrip('/')}/v1/chat/completions"
         headers = {
@@ -48,10 +63,9 @@ class OpenAIProvider(Provider):
             "stream": True,
             # include_usage=True 让兼容后端在最后一帧返回 usage 信息
             "stream_options": {"include_usage": True},
-            "messages": [
-                {"role": m.role, "content": m.content} for m in messages
-            ],
+            "messages": _serialize_messages_legacy(messages),
         }
+        # tools_format 在 T19 完整支持；T3 桥接阶段暂不携带。
 
         input_tokens = 0
         output_tokens = 0

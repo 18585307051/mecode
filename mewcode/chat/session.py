@@ -33,16 +33,23 @@ class Session:
     current_provider_name: str = ""
 
     def append_user(self, text: str) -> None:
-        """把一条用户消息追加到历史。"""
-        self.messages.append(Message(role="user", content=text))
+        """把一条用户消息追加到历史。
+
+        T3 桥接：第二阶段 Message.content 升级为 list[ContentBlock]，
+        本方法用 Message.text 工厂构造单 TextBlock 消息，保持调用方
+        语义不变。本方法将在 T20 重写为 append_user_text 与配套接口。
+        """
+        self.messages.append(Message.text("user", text))
 
     def append_assistant(self, text: str) -> None:
-        """把一条 AI 回复追加到历史。
+        """把一条 AI 回复追加到历史（纯文本）。
+
+        T3 桥接：与 append_user 同理；T20 重写为 append_assistant(blocks)。
 
         注意：被中断（Ctrl+C）的回复不应调用此方法，以满足 spec N5
         "中断不进历史"语义。调用方（chat.run_turn）负责正确判断时机。
         """
-        self.messages.append(Message(role="assistant", content=text))
+        self.messages.append(Message.text("assistant", text))
 
     def clear(self) -> None:
         """清空消息历史。供 /clear 命令与 switch_provider 调用。"""
