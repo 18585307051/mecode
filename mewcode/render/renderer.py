@@ -305,9 +305,13 @@ class Renderer:
             sys.stdout.flush()
 
         elif cls_name == "ToolResultEvent":
-            icon = "✓" if ev.success else "✗"
-            sys.stdout.write(f"  {icon} {ev.name}: {ev.summary}\n")
-            sys.stdout.flush()
+            # 用户反馈：调用后的简略反馈行（✓/✗ name: summary）噪音过多——
+            # 用户已经能从模型回复中得知工具结果。本阶段静默；如需恢复
+            # 显示，去掉下面的 pass 改回原实现。
+            # icon = "✓" if ev.success else "✗"
+            # sys.stdout.write(f"  {icon} {ev.name}: {ev.summary}\n")
+            # sys.stdout.flush()
+            pass
 
         elif cls_name == "Stopped":
             reason_map = {
