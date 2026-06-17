@@ -4,6 +4,7 @@
 - 用 prompt_toolkit 的 PromptSession 读取用户输入（自带方向键历史）。
 - 区分命令行（以 / 开头）与对话行：命令交给 commands.dispatch，
   对话交给 chat.run_turn。
+- 透传 ToolRegistry / Sandbox / Confirmer 给 chat.run_turn（第二阶段）。
 - 处理 prompt 阶段的 Ctrl+C：第一次提示，第二次退出（spec AC22）。
 - 处理 EOF（Ctrl+D / Ctrl+Z）：等同 /exit。
 
@@ -24,6 +25,7 @@ from mewcode.commands import (
 )
 from mewcode.config import AppConfig
 from mewcode.render import Renderer
+from mewcode.tools import Confirmer, Sandbox, ToolRegistry
 
 PROMPT = "> "
 
@@ -32,8 +34,19 @@ async def run_repl(
     session: Session,
     app_config: AppConfig,
     renderer: Renderer,
+    registry: ToolRegistry,
+    sandbox: Sandbox,
+    confirmer: Confirmer,
 ) -> int:
     """REPL 主循环。
+
+    Args:
+        session:    会话状态容器。
+        app_config: 已加载的 mewcode.yaml。
+        renderer:   终端渲染器。
+        registry:   工具注册中心（spec F2 / F21：始终启用，不可为空）。
+        sandbox:    工作目录沙盒（spec F10）。
+        confirmer:  用户 y/N 确认器（DANGEROUS 工具执行前调用）。
 
     Returns:
         进程退出码：0 = 正常退出。
@@ -105,10 +118,16 @@ async def run_repl(
                 return 0
             continue
 
-        # 5. 对话分支：run_turn 内部已处理 KeyboardInterrupt 与 ProviderError
+        # 5. 对话分支：透传 registry/sandbox/confirmer 给 run_turn
         try:
-            await run_turn(session, line, renderer)
+            await run_turn(
+                session, line, renderer,
+                registry=registry,
+                confirmer=confirmer,
+                sandbox=sandbox,
+            )
         except (KeyboardInterrupt, asyncio.CancelledError):
             # 极端兜底：run_turn 应当自吞，万一漏出来也不让它冒到 main
             continue
+
 

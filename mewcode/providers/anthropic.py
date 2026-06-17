@@ -2,31 +2,53 @@
 
 端点：     POST {base_url}/v1/messages
 请求头：   x-api-key、anthropic-version、content-type
-请求体：   {model, max_tokens, stream, messages, thinking?}
-SSE 事件 → StreamEvent 映射：
+请求体：   {model, max_tokens, stream, messages, tools?, thinking?}
 
-    Anthropic 事件                              → 内部事件
-    -------------------------------------------------------
-    message_start (含 input_tokens)             → 记录 input_tokens
-    content_block_delta (text_delta)            → TextDelta
-    content_block_delta (thinking_delta)        → ThinkingDelta（T10 启用）
-    message_delta (含 output_tokens)            → 记录 output_tokens
-    message_stop                                → 发 Usage + Done
+历史序列化（spec F16/F17）：
+- assistant 消息 content 块翻译：
+  - TextBlock     → {"type":"text", "text": ...}
+  - ThinkingBlock → {"type":"thinking", "thinking": ..., "signature": ...}
+  - ToolUseBlock  → {"type":"tool_use", "id": ..., "name": ..., "input": ...}
+- user 消息：
+  - 全是 TextBlock 单块 → {"role":"user", "content": "<text>"}（兼容写法）
+  - 含 ToolResultBlock → content 为块列表，每个 ToolResultBlock 翻译为
+                          {"type":"tool_result", "tool_use_id":..., "content":..., "is_error":bool}
 
-其他事件（ping、content_block_start/stop 等）忽略。
+SSE 事件 → StreamEvent 映射（含工具调用）：
+
+    Anthropic 事件                                                  → 内部事件
+    --------------------------------------------------------------------------
+    message_start (含 input_tokens)                                  → 记录 input_tokens
+    content_block_start (type=tool_use, id=X, name=Y)                → ToolUseStart(X, Y)
+    content_block_delta (text_delta)                                 → TextDelta
+    content_block_delta (thinking_delta)                             → ThinkingDelta（thinking 关闭时丢弃）
+    content_block_delta (input_json_delta, partial_json=P)           → ToolUseInputDelta + 累计
+    content_block_stop（在 tool_use 块上）                            → ToolUseEnd(json.loads(args))
+    message_delta (含 output_tokens)                                 → 记录 output_tokens
+    message_stop                                                      → 发 Usage + Done
+
+其他事件（ping、text/thinking 块的 content_block_start/stop 等）忽略。
 """
 
 import json
 from collections.abc import AsyncIterator
 
 from mewcode.providers.base import Message, Provider
-from mewcode.providers.blocks import TextBlock
+from mewcode.providers.blocks import (
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+)
 from mewcode.providers.errors import StreamParseError
 from mewcode.providers.events import (
     Done,
     StreamEvent,
     TextDelta,
     ThinkingDelta,
+    ToolUseEnd,
+    ToolUseInputDelta,
+    ToolUseStart,
     Usage,
 )
 from mewcode.transport import iter_sse_frames, stream_post
@@ -37,19 +59,66 @@ _THINKING_BUDGET = 4096
 _ANTHROPIC_VERSION = "2023-06-01"
 
 
-def _serialize_messages_legacy(messages: list[Message]) -> list[dict]:
-    """T3 桥接：把 list[ContentBlock] 中所有 TextBlock 拼接还原为字符串。
+def _serialize_messages_anthropic(messages: list[Message]) -> list[dict]:
+    """把 list[Message] 翻译成 Anthropic API 接受的 messages 字段格式。
 
-    第二阶段 Message.content 已升级为 list[ContentBlock]，但 T18 之前
-    Provider 仍按"纯文本字符串"思路构造请求体。本函数让纯对话场景
-    （只含 TextBlock）继续工作；遇到 ToolUseBlock / ToolResultBlock 等
-    暂时忽略（T18 实现完整协议序列化后会被替换）。
+    spec F16 / F17 协议适配：
+    - assistant 消息：content 是块列表，每个块按类型翻译
+    - user 消息：纯文本时简化为 content=str；含 ToolResultBlock 时块列表
     """
     out: list[dict] = []
     for m in messages:
-        text_parts = [b.text for b in m.content if isinstance(b, TextBlock)]
-        out.append({"role": m.role, "content": "".join(text_parts)})
+        if m.role == "assistant":
+            blocks = [_serialize_assistant_block(b) for b in m.content]
+            blocks = [b for b in blocks if b is not None]
+            out.append({"role": "assistant", "content": blocks})
+        else:  # user
+            # 全是 TextBlock → 简化为字符串内容
+            if all(isinstance(b, TextBlock) for b in m.content):
+                text = "".join(b.text for b in m.content if isinstance(b, TextBlock))
+                out.append({"role": "user", "content": text})
+            else:
+                blocks = [_serialize_user_block(b) for b in m.content]
+                blocks = [b for b in blocks if b is not None]
+                out.append({"role": "user", "content": blocks})
     return out
+
+
+def _serialize_assistant_block(b) -> dict | None:
+    """翻译 assistant 消息中的单个内容块。"""
+    if isinstance(b, TextBlock):
+        return {"type": "text", "text": b.text}
+    if isinstance(b, ThinkingBlock):
+        return {
+            "type": "thinking",
+            "thinking": b.text,
+            "signature": b.signature,
+        }
+    if isinstance(b, ToolUseBlock):
+        return {
+            "type": "tool_use",
+            "id": b.id,
+            "name": b.name,
+            "input": b.input,
+        }
+    # ToolResultBlock 不应出现在 assistant 消息中
+    return None
+
+
+def _serialize_user_block(b) -> dict | None:
+    """翻译 user 消息中的单个内容块（含 tool_result 块）。"""
+    if isinstance(b, TextBlock):
+        return {"type": "text", "text": b.text}
+    if isinstance(b, ToolResultBlock):
+        result: dict = {
+            "type": "tool_result",
+            "tool_use_id": b.tool_use_id,
+            "content": b.content,
+        }
+        if b.is_error:
+            result["is_error"] = True
+        return result
+    return None
 
 
 class AnthropicProvider(Provider):
@@ -72,32 +141,29 @@ class AnthropicProvider(Provider):
             "model": self._config.model,
             "max_tokens": _MAX_TOKENS,
             "stream": True,
-            "messages": _serialize_messages_legacy(messages),
+            "messages": _serialize_messages_anthropic(messages),
         }
         if thinking:
             body["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": _THINKING_BUDGET,
             }
-        # tools_format 在 T18 完整支持；T3 桥接阶段暂不携带
-        # （即便外层传入也不放进请求体）。
+        if tools_format:
+            body["tools"] = tools_format
 
-        # 累积变量：input_tokens 在 message_start 时拿到，output_tokens
-        # 来自 message_delta。
-        # 关于 thinking_tokens：实测 DeepSeek 通过 Anthropic 协议返回的 usage
-        # 中不单独包含思考 token 字段，思考 token 似乎已并入 output_tokens。
-        # Anthropic 官方 API 当前版本也未在 message_delta.usage 中返回独立的
-        # 思考 token 字段，所以这里保持 None；Renderer 判空决定是否显示该项
-        # （spec F13：后端未返回时该行省略相应字段）。
-        # 若未来后端开始单独返回（如 cache_creation_input_tokens 或专用
-        # thinking_tokens 字段），在 message_delta 分支处补一行赋值即可。
+        # ----------------- 累积状态 -----------------
+        # input_tokens 在 message_start 时拿到，output_tokens 来自 message_delta。
+        # thinking_tokens 多数后端不单独返回，保持 None；详见前一版的注释。
         input_tokens = 0
         output_tokens = 0
         thinking_tokens: int | None = None
 
-        # 收到 message_stop 后置 True，后续 SSE 帧（如 ping）继续消费但
-        # 不再产生事件——为的是让底层 byte_stream 自然走到 EOF，避免
-        # 提前 return 触发 httpx async with 的 GeneratorExit 清理路径。
+        # tool_use 累积：index → {"id":..., "name":..., "args": <累计 JSON 字符串>}
+        # 同一时刻可能有多个 tool_use 块并发存在（虽然实测 Anthropic 是按 index 串行），
+        # 用 dict 按 index 维度归并 input_json_delta。
+        tool_use_buf: dict[int, dict] = {}
+
+        # 收到 message_stop 后置 True，后续 SSE 帧继续消费但不再产生事件。
         finished = False
 
         byte_stream = stream_post(url, headers, body)
@@ -127,7 +193,23 @@ class AnthropicProvider(Provider):
                         input_tokens = usage["input_tokens"]
                     continue
 
-                # content_block_delta：正文增量 / 思考增量
+                # content_block_start：可能是 text / thinking / tool_use 块开始
+                if event == "content_block_start":
+                    idx = data_obj.get("index")
+                    block = data_obj.get("content_block", {})
+                    if block.get("type") == "tool_use" and isinstance(idx, int):
+                        tu_id = block.get("id", "")
+                        tu_name = block.get("name", "")
+                        tool_use_buf[idx] = {
+                            "id": tu_id,
+                            "name": tu_name,
+                            "args": "",
+                        }
+                        yield ToolUseStart(id=tu_id, name=tu_name)
+                    # text / thinking 块的 start 不需要内部事件
+                    continue
+
+                # content_block_delta：text/thinking/工具参数 三种增量
                 if event == "content_block_delta":
                     delta = data_obj.get("delta", {})
                     dtype = delta.get("type")
@@ -137,14 +219,46 @@ class AnthropicProvider(Provider):
                             yield TextDelta(text=text)
                     elif dtype == "thinking_delta":
                         # 关键：仅在客户端启用 thinking 时才转发思考增量。
-                        # 兼容性保险——某些后端（如 DeepSeek 的 Anthropic 协议
-                        # 端点）即便客户端未传 thinking 字段也会主动返回思考内容；
-                        # 此时 Provider 层负责丢弃，让 spec AC12（默认关闭时
-                        # 回复中无思考块）保持成立。
+                        # DeepSeek 等后端即便客户端未传 thinking 字段也会主动
+                        # 返回思考内容；Provider 层负责丢弃以满足 spec AC12。
                         if thinking:
                             text = delta.get("thinking", "")
                             if text:
                                 yield ThinkingDelta(text=text)
+                    elif dtype == "input_json_delta":
+                        idx = data_obj.get("index")
+                        partial = delta.get("partial_json", "")
+                        if isinstance(idx, int) and idx in tool_use_buf:
+                            tool_use_buf[idx]["args"] += partial
+                            yield ToolUseInputDelta(
+                                id=tool_use_buf[idx]["id"], json_chunk=partial
+                            )
+                    continue
+
+                # content_block_stop：tool_use 块结束时发 ToolUseEnd
+                if event == "content_block_stop":
+                    idx = data_obj.get("index")
+                    if isinstance(idx, int) and idx in tool_use_buf:
+                        state = tool_use_buf.pop(idx)
+                        args_str = state["args"] or "{}"
+                        try:
+                            input_obj = json.loads(args_str)
+                        except json.JSONDecodeError as e:
+                            raise StreamParseError(
+                                f"工具调用参数 JSON 解析失败 "
+                                f"(name={state['name']}, id={state['id']}): {e}; "
+                                f"原始: {args_str[:200]}"
+                            ) from e
+                        if not isinstance(input_obj, dict):
+                            raise StreamParseError(
+                                f"工具调用参数必须是对象 "
+                                f"(name={state['name']}, id={state['id']}, "
+                                f"got {type(input_obj).__name__})"
+                            )
+                        yield ToolUseEnd(
+                            id=state["id"], name=state["name"], input=input_obj
+                        )
+                    # text / thinking 块的 stop 直接忽略
                     continue
 
                 # message_delta：抽取 output_tokens
@@ -165,12 +279,9 @@ class AnthropicProvider(Provider):
                     finished = True
                     continue
 
-                # 其他事件（ping、content_block_start/stop 等）：忽略
+                # 其他事件（ping 等）：忽略
         finally:
-            # 显式关闭底层异步生成器，吞掉清理路径上的所有异常。
-            # httpx 在 GC 路径中会从 socket 抛 ReadError、CancelledError 等
-            # 良性 cleanup noise，如果不在这里 swallow，它们会通过 stderr
-            # 渗漏到终端，污染输出（spec N4 控制字符泄漏）。
+            # 显式关闭底层异步生成器，吞清理路径上的良性异常
             for s in (sse_stream, byte_stream):
                 try:
                     await s.aclose()

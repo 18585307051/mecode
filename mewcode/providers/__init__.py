@@ -30,6 +30,9 @@ from mewcode.providers.events import (
     StreamEvent,
     TextDelta,
     ThinkingDelta,
+    ToolUseEnd,
+    ToolUseInputDelta,
+    ToolUseStart,
     Usage,
 )
 from mewcode.providers.openai import OpenAIProvider
@@ -60,6 +63,9 @@ __all__ = [
     "ThinkingDelta",
     "ToolResultBlock",
     "ToolUseBlock",
+    "ToolUseEnd",
+    "ToolUseInputDelta",
+    "ToolUseStart",
     "Usage",
     "build_provider",
 ]

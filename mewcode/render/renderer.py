@@ -198,6 +198,78 @@ class Renderer:
         """
         self._console.print_exception()
 
+    # ---------- 工具调用相关（第二阶段） ----------
+
+    def print_tool_call(self, name: str, summary: str) -> None:
+        """工具调用前一行灰字提示（spec F19）。
+
+        格式：'▸ <name>(<summary>)'。沿用朴素 sys.stdout.write，避免
+        rich 复合 SGR 在老 conhost 上乱码。
+        """
+        sys.stdout.write(f"▸ {name}({summary})\n")
+        sys.stdout.flush()
+
+    def print_tool_confirm_detail(self, detail: str) -> None:
+        """打印 DANGEROUS 工具确认提示中的详细内容（spec F19）。
+
+        detail 由 Tool.render_confirm_detail 提供，可能含多行：
+        - WriteTool：路径 + 内容前 N 行
+        - EditTool：路径 + difflib.unified_diff
+        - RunTool：完整命令字符串
+        Confirmer.ask 紧随其后打印 '执行 <name>？[y/N] ' 提示并等待输入。
+        """
+        sys.stdout.write(detail)
+        if not detail.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    def print_tool_result_summary(self, summary: str) -> None:
+        """工具执行后一行简略反馈（spec F19）。
+
+        summary 由 Tool.render_result_summary 提供，例如：
+        - read：'读取 N 行'
+        - glob/search：'匹配 N 项'
+        - run：'退出码 N'
+        - write/edit：'已写入' / '已替换 1 处'
+        - 失败：'失败：<error_category>'
+        """
+        sys.stdout.write(f"  {summary}\n")
+        sys.stdout.flush()
+
+    def print_tool_rejected(self, name: str) -> None:
+        """用户拒绝执行 DANGEROUS 工具时的提示（spec F20）。
+
+        chat 层会同时把 '用户拒绝执行此工具' 作为 ToolResultBlock 反馈
+        给模型，让模型在 Round 2 据此调整答复。
+        """
+        sys.stdout.write(f"已拒绝执行 {name}\n")
+        sys.stdout.flush()
+
+    def print_usage_combined(
+        self, r1: Usage | None, r2: Usage | None
+    ) -> None:
+        """累计两次请求的 token 用量并打印一行（spec D21 / AC35）。
+
+        Round 1 与 Round 2 的 input/output tokens 各自累加；任一含
+        thinking_tokens 时累加显示思考项。完全没有任何 usage 时此方法
+        不输出。
+        """
+        if r1 is None and r2 is None:
+            return
+
+        inp = (r1.input_tokens if r1 else 0) + (r2.input_tokens if r2 else 0)
+        out = (r1.output_tokens if r1 else 0) + (r2.output_tokens if r2 else 0)
+        thk1 = r1.thinking_tokens if r1 else None
+        thk2 = r2.thinking_tokens if r2 else None
+
+        parts = [f"↑ {inp} tokens", f"↓ {out} tokens"]
+        if thk1 is not None or thk2 is not None:
+            thk = (thk1 or 0) + (thk2 or 0)
+            parts.append(f"思考 {thk} tokens")
+
+        sys.stdout.write(" · ".join(parts) + "\n")
+        sys.stdout.flush()
+
     # ---------- 中断收尾 ----------
 
     def abort_streaming(self) -> None:

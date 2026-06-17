@@ -27,6 +27,12 @@ from mewcode.config import ConfigError, load
 from mewcode.providers import build_provider
 from mewcode.render import Renderer
 from mewcode.repl import run_repl
+from mewcode.tools import (
+    Confirmer,
+    Sandbox,
+    ToolRegistry,
+    register_builtins,
+)
 
 CONFIG_FILENAME = "mewcode.yaml"
 
@@ -48,6 +54,16 @@ def _fix_windows_console() -> None:
     """
     if sys.platform != "win32":
         return
+
+    # 把 sys.stdout / sys.stderr 编码强制改为 utf-8 + errors='replace'。
+    # Windows cmd 默认 GBK，遇到 ▸ ↑ ↓ · ▎ 等 emoji 时会抛 UnicodeEncodeError。
+    # reconfigure 是 Python 3.7+ TextIOWrapper 的能力。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
 
     try:
         import colorama
@@ -159,6 +175,11 @@ def main() -> int:
             provider=provider,
             current_provider_name=app_config.default,
         )
+        # 第二阶段：构造工具系统三件套
+        registry = ToolRegistry()
+        register_builtins(registry)
+        sandbox = Sandbox(cwd=Path.cwd())
+        confirmer = Confirmer()
     except Exception:
         renderer.print_exception()
         return 2
@@ -182,7 +203,16 @@ def main() -> int:
             saved_stderr_fd = None
 
         try:
-            return asyncio.run(run_repl(session, app_config, renderer))
+            return asyncio.run(
+                run_repl(
+                    session,
+                    app_config,
+                    renderer,
+                    registry,
+                    sandbox,
+                    confirmer,
+                )
+            )
         except KeyboardInterrupt:
             # asyncio.Runner 在 SIGINT 时可能把 KeyboardInterrupt 一路抛
             # 到这里——这是用户主动退出意图，干净返回 0，不打堆栈。

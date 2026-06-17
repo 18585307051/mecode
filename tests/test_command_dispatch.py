@@ -72,11 +72,26 @@ class _StubSession:
         self.thinking_enabled = False
         self.current_provider_name = name
 
-    def append_user(self, text: str) -> None:
+    def append_user_text(self, text: str) -> None:
         self.messages.append(Message.text("user", text))
 
-    def append_assistant(self, text: str) -> None:
-        self.messages.append(Message.text("assistant", text))
+    def append_user(self, text: str) -> None:
+        """旧名兼容：保留给少数测试调用。"""
+        self.append_user_text(text)
+
+    def append_assistant(self, content) -> None:
+        """适配 T20 新接口 + 旧接口：
+
+        - 新接口：传 list[ContentBlock]，直接组装为消息
+        - 旧接口：传 str，包装成 TextBlock 单块
+        """
+        if isinstance(content, str):
+            self.messages.append(Message.text("assistant", content))
+        else:
+            self.messages.append(Message(role="assistant", content=list(content)))
+
+    def append_tool_results(self, results) -> None:
+        self.messages.append(Message.tool_results(results))
 
     def clear(self) -> None:
         self.messages.clear()
