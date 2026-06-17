@@ -300,11 +300,18 @@ class Renderer:
         elif cls_name == "ToolCall":
             # 工具自身的 render_call_summary 已经返回完整动词式描述
             # （Read xxx / Wrote xxx / Edited xxx +N-M / Bash xxx /
-            # Glob xxx / Search xxx），直接打印，不再用 ▸ name(...) 包装
+            # Glob xxx / Search xxx）。
+            # 渲染样式：● <动词加粗青色> <其余内容>
             summary = ev.summary
             if len(summary) > 120:
                 summary = summary[:117] + "..."
-            sys.stdout.write(f"{summary}\n")
+            # 把首词（动词）用粗体青色高亮
+            parts = summary.split(" ", 1)
+            verb = parts[0]
+            rest = f" {parts[1]}" if len(parts) > 1 else ""
+            # ANSI: \033[36m 青色  \033[1m 粗体  \033[0m 重置
+            line = f"\033[36m●\033[0m \033[1;36m{verb}\033[0m{rest}\n"
+            sys.stdout.write(line)
             sys.stdout.flush()
 
         elif cls_name == "ToolResultEvent":
@@ -330,13 +337,15 @@ class Renderer:
                 sys.stdout.flush()
 
         elif cls_name == "UsageTotal":
+            # 加粗 + 数字青色突出
             parts = [
-                f"↑ {ev.input_tokens} tokens",
-                f"↓ {ev.output_tokens} tokens",
+                f"↑ \033[1;36m{ev.input_tokens}\033[0m tokens",
+                f"↓ \033[1;36m{ev.output_tokens}\033[0m tokens",
             ]
             if ev.thinking_tokens is not None:
-                parts.append(f"思考 {ev.thinking_tokens} tokens")
-            # 用户反馈：去掉末尾的 "N 轮"
+                parts.append(
+                    f"思考 \033[1;36m{ev.thinking_tokens}\033[0m tokens"
+                )
             sys.stdout.write(" · ".join(parts) + "\n")
             sys.stdout.flush()
 
