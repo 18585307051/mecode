@@ -77,3 +77,16 @@ class ToolInterruptedError(ToolError):
     """
 
     category = "用户中断"
+
+
+class PathRaceConditionError(ToolError):
+    """TOCTOU 竞态：文件 open 后路径被换成符号链接（spec 第五阶段 F3 / Q9 / D2）。
+
+    Sandbox.safe_open 在 open 之后立即 fstat（已打开的 fd）+ lstat
+    （路径本身），比对 inode + dev。两者不一致说明路径被换了——典型
+    TOCTOU 攻击模式。
+
+    本错误属于"安全防御"类，error_category 为 "TOCTOU 竞态"。
+    """
+
+    category = "TOCTOU 竞态"

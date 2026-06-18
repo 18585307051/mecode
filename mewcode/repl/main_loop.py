@@ -37,6 +37,9 @@ async def run_repl(
     registry: ToolRegistry,
     sandbox: Sandbox,
     confirmer: Confirmer,
+    *,
+    policy=None,
+    asker=None,
 ) -> int:
     """REPL 主循环。
 
@@ -47,6 +50,8 @@ async def run_repl(
         registry:   工具注册中心（spec F2 / F21：始终启用，不可为空）。
         sandbox:    工作目录沙盒（spec F10）。
         confirmer:  用户 y/N 确认器（DANGEROUS 工具执行前调用）。
+        policy:     第五阶段权限策略（可选）。None 时不做权限检查。
+        asker:      第五阶段人在回路询问器（可选）。
 
     Returns:
         进程退出码：0 = 正常退出。
@@ -107,6 +112,7 @@ async def run_repl(
             app_config=app_config,
             args=[],
             renderer=renderer,
+            policy=policy,
         )
         try:
             result = await dispatch(line, ctx)
@@ -118,13 +124,15 @@ async def run_repl(
                 return 0
             continue
 
-        # 5. 对话分支：透传 registry/sandbox/confirmer 给 run_turn
+        # 5. 对话分支：透传 registry/sandbox/confirmer + 第五阶段 policy/asker
         try:
             await run_turn(
                 session, line, renderer,
                 registry=registry,
                 confirmer=confirmer,
                 sandbox=sandbox,
+                policy=policy,
+                asker=asker,
             )
         except (KeyboardInterrupt, asyncio.CancelledError):
             # 极端兜底：run_turn 应当自吞，万一漏出来也不让它冒到 main

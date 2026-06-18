@@ -90,18 +90,29 @@ async def run_turn(
     registry: ToolRegistry | None = None,
     confirmer: Confirmer | None = None,
     sandbox: Sandbox | None = None,
+    policy=None,  # PermissionPolicy | None；第五阶段引入，向后兼容
+    asker=None,   # PermissionAsker | None；同上
 ) -> bool:
     """跑一轮对话（Agent Loop 多轮 ReAct 循环）。
 
-    签名与第二阶段完全一致（spec F9）——REPL 调用方零改动。
-    无 tool_use 时退化为一轮直答（行为与第二阶段一致）。
+    签名与第二阶段兼容（仅新增可选 policy / asker）——REPL 调用方
+    不传时回退第四阶段行为（无权限检查）。
+
+    Args:
+        policy: 第五阶段 PermissionPolicy 实例。None 时所有工具调用
+            视为 allow（向后兼容，方便测试）。
+        asker:  第五阶段 PermissionAsker 实例。policy 返回 ask 时用此询问。
+            policy 不为 None 但 asker 为 None 时，ask 视为 deny（兜底）。
 
     Returns:
         True  —— Loop 正常完成（含自然停止 / 软停止 / 未知工具停止）
         False —— 用户中断 / Provider 错误（已自处理）
     """
     session.append_user_text(user_input)
-    return await _agent_loop(session, renderer, registry, confirmer, sandbox)
+    return await _agent_loop(
+        session, renderer, registry, confirmer, sandbox,
+        policy=policy, asker=asker,
+    )
 
 
 async def _agent_loop(
@@ -110,6 +121,9 @@ async def _agent_loop(
     registry: ToolRegistry | None,
     confirmer: Confirmer | None,
     sandbox: Sandbox | None,
+    *,
+    policy=None,
+    asker=None,
 ) -> bool:
     """Agent Loop 主循环。"""
     total_in = 0
@@ -178,7 +192,8 @@ async def _agent_loop(
                 if unknown_streak >= UNKNOWN_TOOL_THRESHOLD:
                     # 仍执行本轮工具（把未知工具错误反馈给模型），但不再继续
                     results, cancelled = await _execute_tool_batch(
-                        session, renderer, registry, confirmer, sandbox, tool_uses
+                        session, renderer, registry, confirmer, sandbox, tool_uses,
+                        policy=policy, asker=asker,
                     )
                     if not cancelled:
                         session.append_tool_results(results)
@@ -190,7 +205,8 @@ async def _agent_loop(
 
         # 执行工具
         results, cancelled = await _execute_tool_batch(
-            session, renderer, registry, confirmer, sandbox, tool_uses
+            session, renderer, registry, confirmer, sandbox, tool_uses,
+            policy=policy, asker=asker,
         )
 
         # 停止条件 3: 用户取消
@@ -217,6 +233,9 @@ async def _execute_tool_batch(
     confirmer: Confirmer | None,
     sandbox: Sandbox | None,
     tool_uses: list[ToolUseBlock],
+    *,
+    policy=None,
+    asker=None,
 ) -> tuple[list[ToolResultBlock], bool]:
     """分批执行 tool_use（spec F3）。
 
@@ -244,6 +263,7 @@ async def _execute_tool_batch(
     dangerous_tools: list[tuple[int, ToolUseBlock]] = []
     unknown_tools: list[tuple[int, ToolUseBlock]] = []
     plan_blocked: list[tuple[int, ToolUseBlock]] = []  # Plan Mode 拒绝的非只读工具
+    policy_denied: list[tuple[int, ToolUseBlock, str]] = []  # 第五阶段：权限/黑名单拒绝
 
     for idx, tu in enumerate(tool_uses):
         tool = registry.get(tu.name)
@@ -254,6 +274,38 @@ async def _execute_tool_batch(
         if session.mode == "plan" and not tool.readonly:
             plan_blocked.append((idx, tu))
             continue
+        # 第五阶段：权限策略检查（spec F1 / F8）
+        if policy is not None:
+            decision = policy.check(tu.name, tu.input)
+            if decision.action == "deny":
+                policy_denied.append((idx, tu, decision.reason))
+                continue
+            if decision.action == "ask":
+                if asker is None:
+                    # 没有 asker（如单测场景）：兜底 deny
+                    policy_denied.append((idx, tu, "未匹配规则且未配置询问器"))
+                    continue
+                # 调用 asker 询问用户
+                from mewcode.permissions.rules import extract_match_target
+
+                target = extract_match_target(tu.name, tu.input) or ""
+                try:
+                    choice = await asker.ask(tu.name, target, sandbox.cwd)
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    return [], True
+                except ConfirmCancelled:
+                    return [], True
+
+                if choice == "deny":
+                    policy_denied.append(
+                        (idx, tu, "用户拒绝执行此工具")
+                    )
+                    continue
+                if choice == "session":
+                    # 添加会话级 allow，让本会话内同样调用直接通过
+                    policy.add_session_allow_for(tu.name, target)
+                # once / forever / session 都通过 → 进入正常执行流
+            # decision.action == "allow" 直接放行
         if tool.danger_level == DangerLevel.SAFE:
             safe_tools.append((idx, tu))
         else:
@@ -384,6 +436,24 @@ async def _execute_tool_batch(
         results_by_index[idx] = ToolResultBlock(
             tool_use_id=tu.id,
             content=f"Plan Mode 禁止使用非只读工具：{tu.name}",
+            is_error=True,
+        )
+
+    # ---- 5) 第五阶段：权限策略拒绝（黑名单 / 规则 / 用户拒绝）----
+    for idx, tu, deny_reason in policy_denied:
+        _emit(renderer, ToolCall(tu.name, "(权限拒绝)"))
+        _emit(
+            renderer,
+            ToolResultEvent(
+                tool_use_id=tu.id,
+                name=tu.name,
+                summary="权限拒绝",
+                success=False,
+            ),
+        )
+        results_by_index[idx] = ToolResultBlock(
+            tool_use_id=tu.id,
+            content=deny_reason,
             is_error=True,
         )
 

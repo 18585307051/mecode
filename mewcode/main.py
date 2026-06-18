@@ -188,6 +188,18 @@ def main() -> int:
             current_provider_name=app_config.default,
             system_prompt=sys_prompt,
         )
+
+        # 第五阶段：构造权限策略（spec F1 / N7）
+        from mewcode.permissions import PermissionAsker, PermissionPolicy
+
+        policy = PermissionPolicy(cwd=sandbox.cwd)
+        asker = PermissionAsker()
+
+        # yolo 模式启动时打印警告横幅（spec F6 / N8 / AC18）
+        if policy.mode == "yolo":
+            renderer.print_info(
+                "⚠️ 权限模式：YOLO（除致命黑名单外全部放行）"
+            )
     except Exception:
         renderer.print_exception()
         return 2
@@ -219,6 +231,8 @@ def main() -> int:
                     registry,
                     sandbox,
                     confirmer,
+                    policy=policy,
+                    asker=asker,
                 )
             )
         except KeyboardInterrupt:

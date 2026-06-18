@@ -42,6 +42,8 @@ class CommandContext:
     app_config: "AppConfig"
     args: list[str] = field(default_factory=list)
     renderer: "Renderer" = field(default=None)  # type: ignore[assignment]
+    # 第五阶段：权限策略实例（可选）。/permissions 命令族会用到。
+    policy: object = field(default=None)  # PermissionPolicy | None
 
 
 @dataclass(frozen=True)

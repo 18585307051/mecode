@@ -29,3 +29,6 @@ htmlcov/
 .easycode/clipboard/
 .easycode/cache/
 .easycode/logs/
+
+# 第五阶段权限系统：本地规则文件（不应入 git，可能含敏感命令开放）
+.mewcode/permissions.local.yaml

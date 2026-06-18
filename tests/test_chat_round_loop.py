@@ -498,6 +498,65 @@ async def test_PlanMode只含只读工具(sandbox: Sandbox) -> None:
     assert fmt_plan[0]["name"] == "read"
 
 
+# ---------- 第五阶段：权限拒绝不终止 Loop（spec AC11）----------
+
+
+@pytest.mark.asyncio
+async def test_权限拒绝不终止Loop(sandbox: Sandbox) -> None:
+    """权限拒绝把 ToolResult(success=False) 入历史，Loop 继续 R2。"""
+    from mewcode.permissions import PermissionPolicy
+    from mewcode.permissions.rules import parse_rule
+
+    rounds = [
+        # R1：模型调一个会被 deny 的 stub_dangerous 工具
+        [
+            ToolUseStart(id="t1", name="stub_dangerous"),
+            ToolUseEnd(id="t1", name="stub_dangerous", input={"x": 1}),
+            Done(),
+        ],
+        # R2：模型据错误调整，给出文本答复
+        [TextDelta(text="好的，我看到工具被拒绝了"), Done()],
+    ]
+    session, prov = _make_session(rounds)
+    renderer = _StubRenderer()
+    registry = ToolRegistry()
+
+    # stub_dangerous 默认 readonly=True（继承 _StubTool），按工具名映射不到
+    # 已注册工具——所以加一个真正的 stub。这里我们让它注册到 registry，
+    # 但通过 policy 拒绝。
+    dtool = _StubDangerousTool(name="stub_dangerous")
+    registry.register(dtool)
+
+    # 构造 policy：deny stub_dangerous
+    policy = PermissionPolicy(sandbox.cwd)
+    # 加 session deny 规则匹配 stub_dangerous 工具的所有调用
+    # 注：session_deny 用的是 Rule 的 tool="run/read/..."，这里 stub_dangerous
+    # 不在 TOOL_NAME_MAP，所以 parse_rule 会失败。需要构造 Rule 直接：
+    from mewcode.permissions.rules import Rule
+    custom_rule = Rule(tool="stub_dangerous", pattern="*", raw="StubDangerous(*)")
+    policy.add_session_deny(custom_rule)
+
+    # 但 _execute_tool_batch 会先查 registry 找到工具→走 policy.check→
+    # check 内部按 tool_name 匹配 session_deny rule.tool == tool_name。
+    # 所以这里 rule.tool="stub_dangerous" 与 tu.name="stub_dangerous" 一致，
+    # 而 extract_match_target 不识别 stub_dangerous 工具会返回 None；
+    # 此时 policy 的规则匹配段会被跳过 → 走 mode 默认 → ask 兜底拒绝。
+    # 简化：直接让 asker=None + 默认 mode → 触发 ask 兜底 deny
+
+    ok = await run_turn(
+        session, "做点事", renderer, registry, _StubConfirmer(), sandbox,
+        policy=policy, asker=None,  # 没 asker → ask 兜底 deny
+    )
+    assert ok is True
+    # 工具未实际执行
+    assert len(dtool.calls) == 0
+    # tool_results 含拒绝理由
+    tr_msg = session.messages[2]
+    assert tr_msg.content[0].is_error
+    # R2 仍发起
+    assert prov.call_count == 2
+
+
 # ---------- 辅助 ----------
 
 
