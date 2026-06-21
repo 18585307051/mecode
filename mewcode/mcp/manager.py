@@ -59,9 +59,9 @@ async def start_all(
             continue
         client, tools = result
         out[name] = (client, tools)
-        print(
-            f"🔌 MCP Server {name!r} 已就绪（{len(tools)} 个工具）"
-        )
+        # 不在底层 manager 里打印 emoji，避免非 UTF-8 stdout（如临时脚本/
+        # Windows GBK 控制台）触发 UnicodeEncodeError。用户可见横幅由
+        # main.py 的 Renderer 统一输出。
     return out
 
 
