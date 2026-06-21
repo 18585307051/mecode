@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 # 工具名规范化映射：YAML 中首字母大写 ↔ 内部小写 name
 # 第五阶段允许 Bash 与 Run 都映射到 run 工具
+# 第六阶段新增 "mcp" 虚拟工具桶：匹配所有 mcp__ 开头的 MCP 工具
 TOOL_NAME_MAP: dict[str, str] = {
     "bash": "run",
     "run": "run",
@@ -28,6 +29,7 @@ TOOL_NAME_MAP: dict[str, str] = {
     "edit": "edit",
     "glob": "glob",
     "search": "search",
+    "mcp": "mcp",  # 第六阶段：MCP 工具虚拟桶
 }
 
 
@@ -54,10 +56,16 @@ class Rule:
                 - run 工具：command 参数
                 - read/write/edit：path 参数
                 - glob/search：pattern 参数
+                - mcp__* 工具：工具的全名（如 mcp__fs__read_file）
 
         Returns:
             True：tool 与 pattern 都匹配；False：任一不匹配。
         """
+        # MCP 虚拟桶：rule.tool=="mcp" 时匹配所有 mcp__ 开头的工具
+        if self.tool == "mcp":
+            if not tool_name.startswith("mcp__"):
+                return False
+            return fnmatch.fnmatchcase(tool_name, self.pattern)
         if self.tool != tool_name:
             return False
         # fnmatchcase 完整匹配；pattern 含 * 通配
@@ -102,7 +110,11 @@ def extract_match_target(tool_name: str, params: dict) -> str | None:
 
     Returns:
         目标字符串；不支持的工具返回 None（这种工具 policy 视为 ask）。
+        MCP 工具（mcp__ 开头）返回工具的全名作为 target。
     """
+    if tool_name.startswith("mcp__"):
+        # MCP 工具：用全名作为匹配 target（rule.tool=="mcp" 时匹配全名）
+        return tool_name
     if tool_name == "run":
         return params.get("command", "")
     if tool_name in ("read", "write", "edit"):
@@ -116,7 +128,10 @@ def format_rule_for_display(tool_name: str, target: str) -> str:
     """构造规则字符串供写入 YAML 或显示给用户（spec F7 a 选项）。
 
     例如 ('run', 'git status') → 'Bash(git status)'。
+    MCP 工具：('mcp__fs__read', 'mcp__fs__read') → 'Mcp(mcp__fs__read)'。
     """
+    if tool_name.startswith("mcp__"):
+        return f"Mcp({tool_name})"
     verb_map = {
         "run": "Bash",
         "read": "Read",

@@ -133,3 +133,24 @@ def test_format_rule_run() -> None:
 
 def test_format_rule_read() -> None:
     assert format_rule_for_display("read", "a.py") == "Read(a.py)"
+
+
+def test_mcp_rule_bucket() -> None:
+    """第六阶段：Mcp(...) 规则匹配所有 mcp__ 前缀工具。"""
+    r = parse_rule("Mcp(mcp__fs__*)")
+    assert r is not None
+    assert r.tool == "mcp"
+    assert r.matches("mcp__fs__read_file", "mcp__fs__read_file")
+    assert not r.matches("mcp__github__create_issue", "mcp__github__create_issue")
+    assert not r.matches("run", "mcp__fs__read_file")
+
+
+def test_extract_target_mcp() -> None:
+    assert extract_match_target("mcp__fs__read_file", {}) == "mcp__fs__read_file"
+
+
+def test_format_rule_mcp() -> None:
+    assert (
+        format_rule_for_display("mcp__fs__read_file", "mcp__fs__read_file")
+        == "Mcp(mcp__fs__read_file)"
+    )

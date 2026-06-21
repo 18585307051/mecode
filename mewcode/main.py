@@ -203,8 +203,6 @@ def main() -> int:
     except Exception:
         renderer.print_exception()
         return 2
-
-    # 阶段 3：启动 REPL
     # 关键：业务正常路径不会写 stderr，所有用户可见输出都经 Renderer 走
     # stdout（rich 的 Console 默认走 stdout）。但 httpx / asyncio 在
     # cleanup 路径上会偶发漏 traceback 到 stderr（spec N4 控制字符泄漏）。
@@ -224,15 +222,15 @@ def main() -> int:
 
         try:
             return asyncio.run(
-                run_repl(
+                _amain(
                     session,
                     app_config,
                     renderer,
                     registry,
                     sandbox,
                     confirmer,
-                    policy=policy,
-                    asker=asker,
+                    policy,
+                    asker,
                 )
             )
         except KeyboardInterrupt:
@@ -261,6 +259,63 @@ def main() -> int:
                 os.close(devnull_fd)
         except OSError:
             pass
+
+
+async def _amain(
+    session,
+    app_config,
+    renderer,
+    registry,
+    sandbox,
+    confirmer,
+    policy,
+    asker,
+) -> int:
+    """async 主函数：加载 MCP → 启动 REPL → finally 关闭 MCP。
+
+    把 MCP 生命周期放在 asyncio 事件循环内管理，避免嵌套 asyncio.run。
+    """
+    from mewcode.mcp import load_all as load_mcp_configs
+    from mewcode.mcp.manager import (
+        register_to as mcp_register_to,
+        shutdown_all as mcp_shutdown_all,
+        start_all as mcp_start_all,
+    )
+
+    # 第六阶段：加载 MCP 配置 + 并发启动
+    mcp_started: dict = {}
+    try:
+        mcp_configs = load_mcp_configs(sandbox.cwd)
+        if mcp_configs:
+            mcp_started = await mcp_start_all(mcp_configs)
+            mcp_count = mcp_register_to(registry, mcp_started)
+            if mcp_count > 0:
+                loaded = ", ".join(
+                    f"{name} ({len(tools)} 工具)"
+                    for name, (_, tools) in mcp_started.items()
+                )
+                renderer.print_info(f"🔌 已加载 MCP Server: {loaded}")
+    except Exception as e:
+        renderer.print_info(f"⚠️ MCP 加载阶段异常：{e}")
+
+    # 启动 REPL；退出时 finally 关闭 MCP 连接
+    try:
+        return await run_repl(
+            session,
+            app_config,
+            renderer,
+            registry,
+            sandbox,
+            confirmer,
+            policy=policy,
+            asker=asker,
+        )
+    finally:
+        if mcp_started:
+            try:
+                await mcp_shutdown_all(mcp_started)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
