@@ -77,6 +77,21 @@ def test_keep_boundary_扩展真实user边界() -> None:
     assert not any(isinstance(b, ToolResultBlock) for b in first.content)
 
 
+def test_keep_boundary_短历史单条超长() -> None:
+    """短消息数但上一轮 assistant 超长时，也应能压缩前缀。
+
+    典型结构：[user, assistant超长回答, 最新user]。
+    应保留最新 user，压缩它之前的 2 条消息。
+    """
+    msgs = [
+        _user_text("请分析项目"),
+        _assistant_text("很长的分析" + ("x" * 30000)),
+        _user_text("继续，重新检查"),
+    ]
+    keep = compute_keep_boundary(msgs)
+    assert keep == 2
+
+
 def test_keep_boundary_空历史() -> None:
     assert compute_keep_boundary([]) == 0
 

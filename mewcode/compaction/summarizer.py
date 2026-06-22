@@ -105,16 +105,27 @@ def compute_keep_boundary(messages: list) -> int:
     if len(messages) - keep_start < KEEP_MIN_MESSAGES:
         keep_start = max(0, len(messages) - KEEP_MIN_MESSAGES)
 
-    # 3. 扩展到完整 turn 边界：往前找一个真实用户消息
-    while keep_start > 0:
-        m = messages[keep_start]
-        is_real_user = (
+    def _is_real_user(index: int) -> bool:
+        m = messages[index]
+        return (
             m.role == "user"
             and not any(isinstance(b, ToolResultBlock) for b in m.content)
         )
-        if is_real_user:
+
+    # 3. 扩展到完整 turn 边界：往前找一个真实用户消息
+    while keep_start > 0:
+        if _is_real_user(keep_start):
             break
         keep_start -= 1
+
+    # 4. 短消息数但单条超长的特殊场景：
+    #    例如 [user, assistant超长回答, 最新user]，按“至少5条”规则会把
+    #    keep_start 推到 0，导致 no_compactable_prefix。此时应保留最后一
+    #    个真实 user 及其之后内容，压缩其之前的早期上下文。
+    if keep_start == 0 and 1 < len(messages) < KEEP_MIN_MESSAGES:
+        for i in range(len(messages) - 1, 0, -1):
+            if _is_real_user(i):
+                return i
 
     return keep_start
 
