@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from mewcode.compaction.compactor import AUTO_COMPACT_THRESHOLD, Compactor
+from mewcode.compaction.compactor import AUTO_BUFFER, Compactor
 from mewcode.providers import (
     Done,
     Message,
@@ -88,7 +88,7 @@ async def test_达阈值触发并替换messages(tmp_path: Path) -> None:
         msgs.append(_user_text(f"问 {i} " + ("y" * 3000)))
     session = _StubSession(provider, messages=msgs)
     # 强制锚点估算到接近 window
-    session.last_usage_input_tokens = AUTO_COMPACT_THRESHOLD + 100
+    session.last_usage_input_tokens = 128000 - AUTO_BUFFER + 100
     session.last_anchor_message_count = len(msgs)
 
     compactor = Compactor(cwd=tmp_path)
@@ -115,7 +115,7 @@ async def test_3次失败_disabled(tmp_path: Path) -> None:
         msgs.append(_assistant_text(f"a{i}"))
         msgs.append(_user_text(f"q{i}"))
     session = _StubSession(provider, messages=msgs)
-    session.last_usage_input_tokens = AUTO_COMPACT_THRESHOLD + 100
+    session.last_usage_input_tokens = 128000 - AUTO_BUFFER + 100
     session.last_anchor_message_count = len(msgs)
 
     compactor = Compactor(cwd=tmp_path)
@@ -133,7 +133,7 @@ async def test_disabled跳过自动(tmp_path: Path) -> None:
     msgs = [_user_text("hi")]
     session = _StubSession(provider, messages=msgs)
     session.compaction_disabled = True
-    session.last_usage_input_tokens = AUTO_COMPACT_THRESHOLD + 100
+    session.last_usage_input_tokens = 128000 - AUTO_BUFFER + 100
     session.last_anchor_message_count = len(msgs)
 
     compactor = Compactor(cwd=tmp_path)
