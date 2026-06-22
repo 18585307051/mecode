@@ -57,6 +57,22 @@ def test_keep_boundary_至少5条() -> None:
     assert len(msgs) - keep >= KEEP_MIN_MESSAGES
 
 
+def test_keep_boundary_很多轮短对话也可压缩() -> None:
+    """很多轮但总 token 不到 10K 时，/compact 仍应保留最后5条、压缩早期。
+
+    之前 accumulated < KEEP_TOKEN_TARGET 会导致 keep_start=0，从而
+    no_compactable_prefix。
+    """
+    msgs = []
+    for i in range(12):
+        msgs.append(_user_text(f"短问题 {i}"))
+        msgs.append(_assistant_text(f"短回答 {i}"))
+    keep = compute_keep_boundary(msgs)
+    assert keep > 0
+    assert len(msgs) - keep >= KEEP_MIN_MESSAGES
+    assert msgs[keep].role == "user"
+
+
 def test_keep_boundary_扩展真实user边界() -> None:
     """spec AC14 / D6：扩展到一个真实用户消息（不是 tool_results）。"""
     msgs = [

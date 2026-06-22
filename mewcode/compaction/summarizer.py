@@ -101,7 +101,14 @@ def compute_keep_boundary(messages: list) -> int:
         ):
             break
 
-    # 2. 至少 5 条
+    # 2. 如果整段历史都没达到 10K token，但消息数已经超过 5 条，
+    #    手动 /compact 仍应当能压缩：保留最后 5 条，压缩更早消息。
+    #    否则很多轮短对话会因为 accumulated < KEEP_TOKEN_TARGET 而
+    #    keep_start=0，误报 no_compactable_prefix。
+    if accumulated < KEEP_TOKEN_TARGET and len(messages) > KEEP_MIN_MESSAGES:
+        keep_start = max(0, len(messages) - KEEP_MIN_MESSAGES)
+
+    # 3. 至少 5 条
     if len(messages) - keep_start < KEEP_MIN_MESSAGES:
         keep_start = max(0, len(messages) - KEEP_MIN_MESSAGES)
 
