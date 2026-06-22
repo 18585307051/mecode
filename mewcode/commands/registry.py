@@ -48,6 +48,8 @@ class CommandContext:
     instructions: object = field(default=None)  # InstructionsLoader | None
     # 第七阶段：reload 时重建 system_prompt 的 callable（由 main 注入）。
     rebuild_system_prompt: object = field(default=None)  # callable | None
+    # 第八阶段：上下文压缩器（可选）。/compact 命令会用到。
+    compactor: object = field(default=None)  # Compactor | None
 
 
 @dataclass(frozen=True)

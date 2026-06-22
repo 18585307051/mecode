@@ -55,6 +55,12 @@ class Session:
     system_prompt: str = ""
     mode: Literal["do", "plan"] = "do"
     plan_turn_count: int = 0
+    # 第八阶段：上下文压缩状态（spec F2）
+    last_usage_input_tokens: int = 0
+    last_anchor_message_count: int = 0
+    compaction_failures: int = 0
+    compaction_disabled: bool = False
+    session_id: str = ""
 
     def append_user_text(self, text: str) -> None:
         """把一条用户文本消息追加到历史。"""
@@ -81,12 +87,18 @@ class Session:
     def clear(self) -> None:
         """清空消息历史。供 /clear 命令与 switch_provider 调用。
 
-        同时重置 mode 为 "do"（spec F6）与 plan_turn_count 为 0
-        （spec F7）。
+        同时重置 mode 为 "do"（spec F6）、plan_turn_count 为 0
+        （spec F7）以及第八阶段的压缩状态（spec F15）。
+        session_id 不重置（保留为本次启动的 id，供存盘目录使用）。
         """
         self.messages.clear()
         self.mode = "do"
         self.plan_turn_count = 0
+        # 第八阶段：重置压缩状态（保留 session_id）
+        self.last_usage_input_tokens = 0
+        self.last_anchor_message_count = 0
+        self.compaction_failures = 0
+        self.compaction_disabled = False
 
     def switch_provider(self, provider: Provider, name: str = "") -> None:
         """切换 Provider 实例并清空消息历史。
@@ -102,3 +114,8 @@ class Session:
         self.messages.clear()
         self.mode = "do"
         self.plan_turn_count = 0
+        # 第八阶段：切 provider 时重置压缩状态
+        self.last_usage_input_tokens = 0
+        self.last_anchor_message_count = 0
+        self.compaction_failures = 0
+        self.compaction_disabled = False

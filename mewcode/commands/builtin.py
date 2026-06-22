@@ -415,6 +415,56 @@ async def _instructions_reload(ctx: CommandContext) -> CommandResult:
     return CommandResult()
 
 
+# ---------- /compact 命令（第八阶段 spec F16） ----------
+
+
+async def _handle_compact(ctx: CommandContext) -> CommandResult:
+    """/compact [自定义指示]：手动触发上下文压缩。
+
+    spec F16 / Q9：
+    - 不带参数 → 默认摘要 prompt
+    - 带参数 → 用户指示拼接进 prompt 的"额外要求"段
+    - 失败不计入熔断（spec AC22）
+    """
+    compactor = getattr(ctx, "compactor", None)
+    if compactor is None:
+        ctx.renderer.print_info("压缩系统未启用（启动时未注入 Compactor）。")
+        return CommandResult()
+
+    instruction = " ".join(ctx.args).strip()
+
+    try:
+        stats = await compactor.compact_now(ctx.session, instruction)
+    except Exception as e:
+        ctx.renderer.print_info(f"⚠️ 压缩异常：{type(e).__name__}: {e}")
+        return CommandResult()
+
+    if stats.stash_events:
+        ctx.renderer.print_info(
+            f"📦 第一层：存盘 {len(stats.stash_events)} 个工具结果"
+        )
+
+    if stats.summary_succeeded:
+        delta = max(
+            stats.estimated_tokens_before - stats.estimated_tokens_after, 0
+        )
+        ctx.renderer.print_info(
+            f"🧠 已压缩 {stats.compacted_message_count} 条消息。"
+            f"估算 {stats.estimated_tokens_before} → "
+            f"{stats.estimated_tokens_after} tokens（节省约 {delta}）"
+        )
+    elif stats.summary_triggered:
+        ctx.renderer.print_info(
+            f"⚠️ 压缩失败：{stats.summary_error or '未知错误'}"
+        )
+    elif not stats.stash_events:
+        ctx.renderer.print_info(
+            f"当前对话无需压缩（估算 {stats.estimated_tokens_before} tokens）。"
+        )
+
+    return CommandResult()
+
+
 # ---------- 一次性注册 ----------
 
 
@@ -498,5 +548,13 @@ def register_builtins() -> None:
             aliases=(),
             description="管理项目指令文件 AGENTS.md/CLAUDE.md（show/reload）",
             handler=_handle_instructions,
+        )
+    )
+    register(
+        Command(
+            name="compact",
+            aliases=(),
+            description="手动触发上下文压缩（可附自定义指示）",
+            handler=_handle_compact,
         )
     )

@@ -35,3 +35,6 @@ htmlcov/
 
 # 第六阶段 MCP：预留本地 MCP 配置（可能含本机路径/私有 Server）
 .mewcode/mcp_servers.local.yaml
+
+# 第八阶段上下文压缩：工具结果存盘目录（含每次会话的大型 tool_result）
+.mewcode/transcripts/

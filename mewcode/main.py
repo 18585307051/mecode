@@ -200,6 +200,14 @@ def main() -> int:
             renderer.print_info(
                 "⚠️ 权限模式：YOLO（除致命黑名单外全部放行）"
             )
+
+        # 第八阶段：构造上下文压缩器 + session_id（spec F2 / F7）
+        from datetime import datetime
+
+        from mewcode.compaction import Compactor
+
+        session.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        compactor = Compactor(cwd=sandbox.cwd)
     except Exception:
         renderer.print_exception()
         return 2
@@ -231,6 +239,7 @@ def main() -> int:
                     confirmer,
                     policy,
                     asker,
+                    compactor,
                 )
             )
         except KeyboardInterrupt:
@@ -270,6 +279,7 @@ async def _amain(
     confirmer,
     policy,
     asker,
+    compactor,
 ) -> int:
     """async 主函数：加载 MCP → 启动 REPL → finally 关闭 MCP。
 
@@ -351,6 +361,7 @@ async def _amain(
             asker=asker,
             instructions=instructions_loader,
             rebuild_system_prompt=_rebuild_system_prompt,
+            compactor=compactor,
         )
     finally:
         if mcp_started:

@@ -92,26 +92,37 @@ async def run_turn(
     sandbox: Sandbox | None = None,
     policy=None,  # PermissionPolicy | None；第五阶段引入，向后兼容
     asker=None,   # PermissionAsker | None；同上
+    compactor=None,  # Compactor | None；第八阶段引入
 ) -> bool:
     """跑一轮对话（Agent Loop 多轮 ReAct 循环）。
 
-    签名与第二阶段兼容（仅新增可选 policy / asker）——REPL 调用方
-    不传时回退第四阶段行为（无权限检查）。
+    签名与第二阶段兼容（仅新增可选 policy / asker / compactor）——REPL
+    调用方不传时回退到旧版本行为。
 
     Args:
         policy: 第五阶段 PermissionPolicy 实例。None 时所有工具调用
             视为 allow（向后兼容，方便测试）。
         asker:  第五阶段 PermissionAsker 实例。policy 返回 ask 时用此询问。
             policy 不为 None 但 asker 为 None 时，ask 视为 deny（兜底）。
+        compactor: 第八阶段 Compactor 实例。None 时不做任何压缩。
 
     Returns:
         True  —— Loop 正常完成（含自然停止 / 软停止 / 未知工具停止）
         False —— 用户中断 / Provider 错误（已自处理）
     """
     session.append_user_text(user_input)
+
+    # 第八阶段：请求前压缩（spec F1 全图）
+    if compactor is not None:
+        try:
+            stats = await compactor.before_request(session)
+            _emit_compact_stats(renderer, stats)
+        except Exception as e:
+            renderer.print_info(f"⚠️ 压缩阶段异常：{e}")
+
     return await _agent_loop(
         session, renderer, registry, confirmer, sandbox,
-        policy=policy, asker=asker,
+        policy=policy, asker=asker, compactor=compactor,
     )
 
 
@@ -124,6 +135,7 @@ async def _agent_loop(
     *,
     policy=None,
     asker=None,
+    compactor=None,
 ) -> bool:
     """Agent Loop 主循环。"""
     total_in = 0
@@ -154,6 +166,12 @@ async def _agent_loop(
             total_out += usage.output_tokens
             if usage.thinking_tokens is not None:
                 total_thinking = (total_thinking or 0) + usage.thinking_tokens
+            # 第八阶段：更新压缩锚点
+            if compactor is not None:
+                try:
+                    compactor.after_response(session, usage)
+                except Exception:
+                    pass
 
         # blocks is None → 用户取消或流出错
         if blocks is None:
@@ -673,6 +691,27 @@ def _emit(renderer: Renderer, ev: AgentEvent) -> None:
         renderer.on_agent_event(ev)
     except Exception:
         pass  # UI 渲染失败不影响 Agent 逻辑
+
+
+def _emit_compact_stats(renderer: Renderer, stats) -> None:
+    """把 Compactor.before_request 返回的 stats 提示给用户（第八阶段）。"""
+    if stats.stash_events:
+        renderer.print_info(
+            f"📦 已存盘 {len(stats.stash_events)} 个超大工具结果"
+        )
+    if stats.summary_succeeded:
+        delta = max(
+            stats.estimated_tokens_before - stats.estimated_tokens_after, 0
+        )
+        renderer.print_info(
+            f"🧠 已压缩历史：摘要了 {stats.compacted_message_count} 条消息，"
+            f"节省约 {delta} tokens（估算 "
+            f"{stats.estimated_tokens_before} → {stats.estimated_tokens_after}）"
+        )
+    elif stats.summary_triggered and not stats.summary_succeeded:
+        renderer.print_info(
+            f"⚠️ 压缩失败：{stats.summary_error or '未知错误'}"
+        )
 
 
 def _emit_usage(
