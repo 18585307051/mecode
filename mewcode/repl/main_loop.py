@@ -40,6 +40,8 @@ async def run_repl(
     *,
     policy=None,
     asker=None,
+    instructions=None,
+    rebuild_system_prompt=None,
 ) -> int:
     """REPL 主循环。
 
@@ -52,6 +54,8 @@ async def run_repl(
         confirmer:  用户 y/N 确认器（DANGEROUS 工具执行前调用）。
         policy:     第五阶段权限策略（可选）。None 时不做权限检查。
         asker:      第五阶段人在回路询问器（可选）。
+        instructions:  第七阶段项目指令加载器（可选）。供 /instructions 命令使用。
+        rebuild_system_prompt: 第七阶段：reload 时重建 system prompt 的 callable。
 
     Returns:
         进程退出码：0 = 正常退出。
@@ -113,6 +117,8 @@ async def run_repl(
             args=[],
             renderer=renderer,
             policy=policy,
+            instructions=instructions,
+            rebuild_system_prompt=rebuild_system_prompt,
         )
         try:
             result = await dispatch(line, ctx)

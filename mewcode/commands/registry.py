@@ -44,6 +44,10 @@ class CommandContext:
     renderer: "Renderer" = field(default=None)  # type: ignore[assignment]
     # 第五阶段：权限策略实例（可选）。/permissions 命令族会用到。
     policy: object = field(default=None)  # PermissionPolicy | None
+    # 第七阶段：项目指令加载器（可选）。/instructions 命令会用到。
+    instructions: object = field(default=None)  # InstructionsLoader | None
+    # 第七阶段：reload 时重建 system_prompt 的 callable（由 main 注入）。
+    rebuild_system_prompt: object = field(default=None)  # callable | None
 
 
 @dataclass(frozen=True)

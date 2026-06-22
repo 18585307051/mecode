@@ -298,6 +298,46 @@ async def _amain(
     except Exception as e:
         renderer.print_info(f"⚠️ MCP 加载阶段异常：{e}")
 
+    # 第七阶段：加载项目指令文件（spec F1-F7）
+    from mewcode.instructions import InstructionsLoader
+    from mewcode.system_prompt import build_system_prompt as _rebuild_sp
+
+    instructions_loader = InstructionsLoader(sandbox.cwd)
+    instructions_text: str | None = None
+    try:
+        instructions_text = instructions_loader.load_all()
+    except Exception as e:
+        renderer.print_info(f"⚠️ 项目指令加载阶段异常：{e}")
+
+    if instructions_text is not None:
+        # 重新构造 system prompt 注入 custom_instructions（spec F4 / D10）
+        try:
+            sys_prompt = _rebuild_sp(
+                cwd=sandbox.cwd,
+                tools=sorted(t.name for t in registry),
+                custom_instructions=instructions_text,
+            )
+            session.system_prompt = sys_prompt
+        except Exception as e:
+            renderer.print_info(f"⚠️ 项目指令注入 system prompt 失败：{e}")
+        else:
+            # 横幅打印已加载层（spec F7 / AC13）
+            layers = instructions_loader.loaded_layers()
+            parts = [
+                f"{layer.name} ({layer.bytes_len / 1024:.1f}KB)"
+                for layer in layers
+            ]
+            renderer.print_info(f"📋 项目指令: {' + '.join(parts)}")
+
+    # reload callable 给 /instructions reload 用（spec D6）
+    def _rebuild_system_prompt(new_text: str | None) -> None:
+        sys_prompt = _rebuild_sp(
+            cwd=sandbox.cwd,
+            tools=sorted(t.name for t in registry),
+            custom_instructions=new_text,
+        )
+        session.system_prompt = sys_prompt
+
     # 启动 REPL；退出时 finally 关闭 MCP 连接
     try:
         return await run_repl(
@@ -309,6 +349,8 @@ async def _amain(
             confirmer,
             policy=policy,
             asker=asker,
+            instructions=instructions_loader,
+            rebuild_system_prompt=_rebuild_system_prompt,
         )
     finally:
         if mcp_started:

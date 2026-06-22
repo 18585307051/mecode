@@ -347,6 +347,74 @@ deny:
 """
 
 
+# ---------- /instructions 命令族（第七阶段 spec F8/F9/F10） ----------
+
+
+async def _handle_instructions(ctx: CommandContext) -> CommandResult:
+    """/instructions [show|reload]
+
+    管理项目指令文件（AGENTS.md / CLAUDE.md / .mewcoderc）。
+    """
+    loader = ctx.instructions
+    if loader is None:
+        ctx.renderer.print_info(
+            "项目指令系统未启用（启动时未注入 InstructionsLoader）。"
+        )
+        return CommandResult()
+
+    sub = ctx.args[0] if ctx.args else "show"
+
+    if sub == "show":
+        return await _instructions_show(ctx)
+    if sub == "reload":
+        return await _instructions_reload(ctx)
+
+    ctx.renderer.print_info(f"未知子命令：{sub}")
+    ctx.renderer.print_info("用法：/instructions [show|reload]")
+    return CommandResult()
+
+
+async def _instructions_show(ctx: CommandContext) -> CommandResult:
+    """打印当前生效的指令文本（spec F9）。"""
+    text = ctx.instructions.current_text()
+    if not text:
+        ctx.renderer.print_info(
+            "当前未加载任何项目指令。"
+            "建议在项目根创建 AGENTS.md 写明工作规则。"
+        )
+        return CommandResult()
+    ctx.renderer.print_info(text)
+    return CommandResult()
+
+
+async def _instructions_reload(ctx: CommandContext) -> CommandResult:
+    """重新加载三层文件，按 hash 比对决定是否重建 system_prompt（spec F10）。"""
+    changed, new_text = ctx.instructions.reload_and_check()
+
+    if not changed:
+        ctx.renderer.print_info(
+            "指令未变化，未重新构造 system prompt（cache 仍生效）。"
+        )
+        return CommandResult()
+
+    # 内容变了 → 调 main 注入的 rebuild callable 重建 system_prompt
+    rebuild = ctx.rebuild_system_prompt
+    if callable(rebuild):
+        rebuild(new_text)
+
+    if new_text:
+        size_kb = len(new_text.encode("utf-8")) / 1024
+        ctx.renderer.print_info(
+            f"已重新加载（{size_kb:.1f}KB）。"
+            f"下次请求会重新建立 prompt cache。"
+        )
+    else:
+        ctx.renderer.print_info(
+            "已重新加载（三层均无内容，自定义指令段已清空）。"
+        )
+    return CommandResult()
+
+
 # ---------- 一次性注册 ----------
 
 
@@ -422,5 +490,13 @@ def register_builtins() -> None:
             aliases=(),
             description="管理权限规则与模式（show/allow/deny/mode/reload/init）",
             handler=_handle_permissions,
+        )
+    )
+    register(
+        Command(
+            name="instructions",
+            aliases=(),
+            description="管理项目指令文件 AGENTS.md/CLAUDE.md（show/reload）",
+            handler=_handle_instructions,
         )
     )
