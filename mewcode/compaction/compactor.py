@@ -173,6 +173,10 @@ class Compactor:
             return stats
 
         # ---- 替换 messages ----
+        # 成功摘要后的展示统计必须使用同一口径：压缩前/后都用全字符估算。
+        # 否则会出现“锚点估算 4763 → 全字符估算 22963”这种误导性对比。
+        display_estimated_before = estimate_tokens(session.messages, 0, 0)
+
         boundary_msg = build_boundary_message(summary_text, len(early))
         session.messages = [boundary_msg, *recent]
 
@@ -186,6 +190,7 @@ class Compactor:
 
         stats.summary_succeeded = True
         stats.compacted_message_count = len(early)
+        stats.estimated_tokens_before = display_estimated_before
         stats.estimated_tokens_after = estimate_tokens(session.messages, 0, 0)
         return stats
 

@@ -445,14 +445,19 @@ async def _handle_compact(ctx: CommandContext) -> CommandResult:
         )
 
     if stats.summary_succeeded:
-        delta = max(
-            stats.estimated_tokens_before - stats.estimated_tokens_after, 0
-        )
-        ctx.renderer.print_info(
-            f"🧠 已压缩 {stats.compacted_message_count} 条消息。"
-            f"估算 {stats.estimated_tokens_before} → "
-            f"{stats.estimated_tokens_after} tokens（节省约 {delta}）"
-        )
+        before = stats.estimated_tokens_before
+        after = stats.estimated_tokens_after
+        if before > after:
+            ctx.renderer.print_info(
+                f"🧠 已压缩 {stats.compacted_message_count} 条消息。"
+                f"同口径估算 {before} → {after} tokens"
+                f"（节省约 {before - after}）"
+            )
+        else:
+            ctx.renderer.print_info(
+                f"🧠 已压缩 {stats.compacted_message_count} 条消息。"
+                f"当前历史估算约 {after} tokens"
+            )
     elif stats.summary_triggered:
         ctx.renderer.print_info(
             f"⚠️ 压缩失败：{stats.summary_error or '未知错误'}"

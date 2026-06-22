@@ -700,14 +700,19 @@ def _emit_compact_stats(renderer: Renderer, stats) -> None:
             f"📦 已存盘 {len(stats.stash_events)} 个超大工具结果"
         )
     if stats.summary_succeeded:
-        delta = max(
-            stats.estimated_tokens_before - stats.estimated_tokens_after, 0
-        )
-        renderer.print_info(
-            f"🧠 已压缩历史：摘要了 {stats.compacted_message_count} 条消息，"
-            f"节省约 {delta} tokens（估算 "
-            f"{stats.estimated_tokens_before} → {stats.estimated_tokens_after}）"
-        )
+        before = stats.estimated_tokens_before
+        after = stats.estimated_tokens_after
+        if before > after:
+            renderer.print_info(
+                f"🧠 已压缩历史：摘要了 {stats.compacted_message_count} 条消息，"
+                f"节省约 {before - after} tokens（同口径估算 "
+                f"{before} → {after}）"
+            )
+        else:
+            renderer.print_info(
+                f"🧠 已压缩历史：摘要了 {stats.compacted_message_count} 条消息，"
+                f"当前历史估算约 {after} tokens"
+            )
     elif stats.summary_triggered and not stats.summary_succeeded:
         renderer.print_info(
             f"⚠️ 压缩失败：{stats.summary_error or '未知错误'}"
