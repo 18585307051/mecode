@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from mewcode.compaction import Compactor
-from mewcode.compaction.compactor import AUTO_BUFFER
+from mewcode.compaction.compactor import AUTO_COMPACT_THRESHOLD
 from mewcode.providers import (
     Done,
     Message,
@@ -109,7 +109,7 @@ async def main() -> None:
 
         print("[2] 第一层 + 第二层 before_request...")
         # 通过锚点把估算推过阈值，触发第二层
-        session.last_usage_input_tokens = 128000 - AUTO_BUFFER + 100
+        session.last_usage_input_tokens = AUTO_COMPACT_THRESHOLD + 100
         session.last_anchor_message_count = len(session.messages)
 
         stats = await compactor.before_request(session)

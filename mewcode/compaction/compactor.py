@@ -18,10 +18,12 @@ from mewcode.compaction.tokens import estimate_tokens
 
 # ---------- 阈值缓冲（spec F8 / Q5 / D5） ----------
 
-# 自动触发的安全余量（防字符估算偏差）
-AUTO_BUFFER = 13000
+# 自动触发固定阈值。
+# 用户反馈：默认按 context_window - 13K 触发太晚，调成 5000 tokens，
+# 便于长任务早压缩，也方便本地验证压缩链路。
+AUTO_COMPACT_THRESHOLD = 5000
 
-# 手动触发的安全余量（用户已下决定）
+# 手动触发的安全余量（用户已下决定，保留作后续配置使用）
 MANUAL_BUFFER = 3000
 
 # 未知模型的保守默认 context window
@@ -128,13 +130,10 @@ class Compactor:
             return stats
 
         # ---- 第二层判定 ----
-        window = self.get_window(session.provider.model)
-        auto_threshold = window - AUTO_BUFFER
-
         if manual:
             should_compact = True  # /compact 必触发
         else:
-            should_compact = estimated >= auto_threshold
+            should_compact = estimated >= AUTO_COMPACT_THRESHOLD
 
         if not should_compact:
             stats.estimated_tokens_after = estimated
