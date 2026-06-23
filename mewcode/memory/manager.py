@@ -120,6 +120,77 @@ class MemoryManager:
             project_index=project_index,
         )
 
+    # ---- 第十阶段：/memory 命令族支持 ----
+
+    def get_combined_index_text(self) -> str:
+        """返回注入 system_prompt 的合并 memory 文本（与 load_context.text 同口径）。
+
+        无 index 时返回空字符串。本方法**不**刷新 _last_hash，避免 /memory show
+        干扰后续 refresh_system_prompt_if_changed 的 hash 比较。
+        """
+        user_index = read_index(self._user_root)
+        project_index = read_index(self._project_root)
+        text = _compose_memory_text(user_index, project_index)
+        return text or ""
+
+    def list_notes(self, scope: Scope | None = None) -> list[dict]:
+        """枚举两层 notes/*.md，按 scope 过滤；返回精简元数据。
+
+        每条形如：
+            {"note_id": str, "scope": "user"|"project", "category": str,
+             "updated_at": "YYYY-MM-DD HH:MM",
+             "title": str}
+        按 updated_at 倒序。
+        """
+        scopes: tuple[Scope, ...]
+        if scope == "user":
+            scopes = ("user",)
+        elif scope == "project":
+            scopes = ("project",)
+        else:
+            scopes = ("user", "project")
+
+        rows: list[dict] = []
+        for s in scopes:
+            for note in list_notes(self.root_for(s)):
+                title = self._extract_title(note.body)
+                rows.append({
+                    "note_id": note.id,
+                    "scope": note.scope,
+                    "category": note.category,
+                    "updated_at": note.updated_at.strftime("%Y-%m-%d %H:%M"),
+                    "title": title,
+                })
+        rows.sort(key=lambda r: r["updated_at"], reverse=True)
+        return rows
+
+    @staticmethod
+    def _extract_title(body: str) -> str:
+        """笔记主体的第一行非空文本，截断 60 字符。"""
+        for raw in body.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            return line[:60]
+        return ""
+
+    async def refresh(self, rebuild_system_prompt: RebuildSystemPrompt | None = None) -> bool:
+        """强制重读 notes、重建两层 index、按 hash 决定是否重建 system_prompt。
+
+        供 /memory refresh 命令使用。返回 True 表示 index hash 发生变化、
+        且（如有）成功调用了 rebuild_system_prompt。
+        """
+        from mewcode.memory.index import rebuild_index
+        try:
+            rebuild_index(self._user_root, "user")
+        except Exception as e:
+            print(f"⚠️ 重建 user index 失败（已忽略）：{e}")
+        try:
+            rebuild_index(self._project_root, "project")
+        except Exception as e:
+            print(f"⚠️ 重建 project index 失败（已忽略）：{e}")
+        return self.refresh_system_prompt_if_changed(rebuild_system_prompt)
+
     # ---- 与 main 协作的 system_prompt 刷新 ----
 
     def refresh_system_prompt_if_changed(

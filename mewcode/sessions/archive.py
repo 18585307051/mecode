@@ -468,3 +468,32 @@ class SessionArchive:
         sid = self.new_session_id()
         session.session_id = sid
         return sid
+
+    # ---- 第十阶段：/session resume 显式入口 ----
+
+    def load_by_id(self, session_id: str) -> RestoreResult:
+        """按精确 session_id 加载会话。
+
+        薄封装 `restore(session_id)`，语义对齐 /session resume 命令：
+        命中 → 返回与启动恢复一致的 RestoreResult（含坏行计数 / 截断
+        标志 / >24h 间隔提醒）。
+        未命中 → restored=False 的占位结果。
+        """
+        return self.restore(session_id)
+
+    def find_by_prefix(self, prefix: str) -> list[str]:
+        """按 session_id 前缀模糊匹配，返回命中的完整 session_id 列表。
+
+        prefix 为空时返回空列表；目录不存在时返回空列表。
+        多匹配时由调用方提示用户给出更具体的 id。
+        """
+        if not prefix or not self._dir.is_dir():
+            return []
+        prefix_lc = prefix.lower()
+        out: list[str] = []
+        for path in self._dir.glob("*.jsonl"):
+            sid = path.stem
+            if sid.lower().startswith(prefix_lc):
+                out.append(sid)
+        out.sort()
+        return out

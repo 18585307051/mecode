@@ -73,7 +73,7 @@ class Renderer:
         self._console.print(text)
 
     def print_command_list(self, commands: list) -> None:
-        """/help 输出。"""
+        """/help 输出（旧接口）。第十阶段保留作回退。"""
         self._console.print("[bold]可用命令：[/]")
         for cmd in commands:
             name = f"/{cmd.name}"
@@ -83,6 +83,123 @@ class Renderer:
             else:
                 line = f"  [cyan]{name}[/]  {cmd.description}"
             self._console.print(line)
+
+    def print_command_groups(self, grouped: dict) -> None:
+        """/help 三段分组输出（spec 第十阶段 F6）。
+
+        grouped 形如：
+            {
+                "local": [Command, ...],
+                "stateful": [Command, ...],
+                "prompt": [Command, ...],
+            }
+        空段不输出。
+        """
+        section_titles = [
+            ("local", "查询命令（不影响对话状态）"),
+            ("stateful", "操作命令（修改状态）"),
+            ("prompt", "对话命令（向 AI 发起请求）"),
+        ]
+        printed_any = False
+        for key, title in section_titles:
+            cmds = grouped.get(key) or []
+            if not cmds:
+                continue
+            if printed_any:
+                self._console.print("")
+            printed_any = True
+            self._console.print(f"[bold]{title}：[/]")
+            for cmd in cmds:
+                name = f"/{cmd.name}"
+                # 主名前缀展示对齐到 16 字符
+                pad = max(16 - len(name), 1)
+                main = f"  [cyan]{name}[/]" + (" " * pad)
+                desc = cmd.description
+                if cmd.aliases:
+                    aliases = ", ".join(f"/{a}" for a in cmd.aliases)
+                    desc = f"{desc}  [dim](别名: {aliases})[/]"
+                self._console.print(main + desc)
+
+    def print_status(self, snapshot: dict) -> None:
+        """/status 仪表盘输出（spec 第十阶段 F8）。
+
+        snapshot 是 OrderedDict-like 的 dict[str, list[str]]，键是节标题，
+        值是该节的若干行字符串。按插入顺序输出。
+        """
+        first = True
+        for title, lines in snapshot.items():
+            if not first:
+                self._console.print("")
+            first = False
+            self._console.print(f"[bold]## {title}[/]")
+            if not lines:
+                self._console.print("  [dim]（无）[/]")
+                continue
+            for line in lines:
+                self._console.print(f"  {line}")
+
+    def print_session_list(self, rows: list, current_id: str = "") -> None:
+        """/session list 表格输出（spec 第十阶段 F9）。
+
+        rows 每条形如：
+            {"session_id": ..., "message_count": int,
+             "updated_at": "YYYY-MM-DD HH:MM",
+             "title": str}
+        当前会话在前缀加 `*`。
+        """
+        if not rows:
+            self._console.print("[dim]（暂无会话存档）[/]")
+            return
+        self._console.print(
+            "[bold]  会话 ID                        消息   最近更新           标题[/]"
+        )
+        for r in rows:
+            sid = r["session_id"]
+            mark = "[green]*[/]" if sid == current_id else " "
+            sid_disp = sid[:24].ljust(24)
+            cnt = str(r.get("message_count", 0)).rjust(4)
+            updated = (r.get("updated_at") or "")[:16].ljust(16)
+            title = r.get("title") or ""
+            if len(title) > 30:
+                title = title[:29] + "…"
+            self._console.print(f" {mark} {sid_disp}   {cnt}   {updated}   {title}")
+
+    def print_session_current(self, info: dict) -> None:
+        """/session current 多行输出。"""
+        self._console.print("[bold]当前会话：[/]")
+        for k, v in info.items():
+            self._console.print(f"  {k}: {v}")
+
+    def print_note_list(self, rows: list) -> None:
+        """/memory list 表格输出（spec 第十阶段 F10）。
+
+        rows 每条形如：
+            {"note_id": ..., "scope": "user"|"project", "category": str,
+             "updated_at": "YYYY-MM-DD HH:MM",
+             "title": str}
+        """
+        if not rows:
+            self._console.print("[dim]（暂无长期记忆笔记）[/]")
+            return
+        self._console.print(
+            "[bold]  笔记 ID                          范围      类别                最近更新           标题[/]"
+        )
+        for r in rows:
+            nid = (r.get("note_id") or "")[:30].ljust(30)
+            scope = (r.get("scope") or "")[:8].ljust(8)
+            cat = (r.get("category") or "")[:18].ljust(18)
+            updated = (r.get("updated_at") or "")[:16].ljust(16)
+            title = r.get("title") or ""
+            if len(title) > 30:
+                title = title[:29] + "…"
+            self._console.print(f"  {nid}  {scope}  {cat}  {updated}   {title}")
+
+    def print_memory_index(self, text: str) -> None:
+        """/memory show 输出长期记忆索引文本。空文本时打印占位。"""
+        if not text or not text.strip():
+            self._console.print("[dim]（暂无长期记忆，未生成 index）[/]")
+            return
+        self._console.print(text)
 
     def print_provider_list(
         self,

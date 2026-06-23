@@ -277,11 +277,11 @@ async def test_provider_不存在(app_config: AppConfig) -> None:
 
 @pytest.mark.asyncio
 async def test_help(app_config: AppConfig) -> None:
-    """/help 应调用 print_command_list。"""
+    """/help 应调用 print_command_groups（第十阶段三段分组）。"""
     session = _StubSession(_StubProvider(_make_cfg("alpha", "anthropic")))
     renderer = _StubRenderer()
     await dispatch("/help", _make_ctx(session, app_config, renderer))
-    assert renderer.has("print_command_list")
+    assert renderer.has("print_command_groups")
     # /help 不应触发 print_unknown_command
     assert not renderer.has("print_unknown_command")
 

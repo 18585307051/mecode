@@ -1,41 +1,46 @@
-"""七个内置斜杠命令的实现。
+"""内置斜杠命令实现 + 注册（第十阶段重构）。
 
-调用 register_builtins() 把所有内置命令写入全局 COMMANDS 表。
-此函数幂等：重复调用只会用相同内容覆盖。
+本文件承载：
+- STATEFUL 类 handler 的具体实现
+- register_builtins() 把所有命令（含 LOCAL/PROMPT 类引自 views/review）
+  写入全局 COMMANDS
+
+LOCAL 类 handler（/help /status /session list/current /memory show/list）
+位于 mewcode/commands/views.py。
+PROMPT 类 handler（/review）位于 mewcode/commands/review.py。
+
+register_builtins 自身幂等：
+- 同对象重复注册被 registry.register 视为 noop。
+- 测试场景下若需重新注册，先调用 unregister_all()。
 """
 
+from __future__ import annotations
+
+from pathlib import Path
+
 from mewcode.commands.registry import (
-    COMMANDS,
     Command,
     CommandContext,
     CommandResult,
+    CommandType,
     register,
+)
+from mewcode.commands.review import _handle_review
+from mewcode.commands.views import (
+    _handle_help,
+    _handle_memory,
+    _handle_session,
+    _handle_status,
 )
 from mewcode.providers import build_provider
 
 
-# ---------- handler 实现 ----------
+# ---------- STATEFUL handler：原有 12 条命令的实现 ----------
 
 
 async def _handle_exit(ctx: CommandContext) -> CommandResult:
     """/exit 与 /quit：通知 REPL 主循环退出。"""
     return CommandResult(should_exit=True)
-
-
-async def _handle_help(ctx: CommandContext) -> CommandResult:
-    """/help：列出所有命令及简短说明。"""
-    # 去重：同一个 Command 对象在 COMMANDS 中可能因别名出现多次
-    seen: set[int] = set()
-    unique: list[Command] = []
-    for cmd in COMMANDS.values():
-        if id(cmd) in seen:
-            continue
-        seen.add(id(cmd))
-        unique.append(cmd)
-    # 按 name 排序，让输出稳定
-    unique.sort(key=lambda c: c.name)
-    ctx.renderer.print_command_list(unique)
-    return CommandResult()
 
 
 async def _handle_clear(ctx: CommandContext) -> CommandResult:
@@ -123,13 +128,13 @@ async def _handle_do(ctx: CommandContext) -> CommandResult:
     return CommandResult()
 
 
-# ---------- /permissions 子命令族（第五阶段 spec F9） ----------
+# ---------- /permission 子命令族（第五阶段 spec F9，第十阶段重命名） ----------
 
 
-async def _handle_permissions(ctx: CommandContext) -> CommandResult:
-    """/permissions [show|allow|deny|mode|reload|init] ...
+async def _handle_permission(ctx: CommandContext) -> CommandResult:
+    """/permission [show|allow|deny|mode|reload|init] ...
 
-    管理权限规则与模式。详见各子命令的 docstring。
+    第十阶段把 /permissions 重命名为 /permission（单数），旧名作为别名保留。
     """
     policy = ctx.policy
     if policy is None:
@@ -159,7 +164,7 @@ async def _handle_permissions(ctx: CommandContext) -> CommandResult:
 
     ctx.renderer.print_info(f"未知子命令：{sub}")
     ctx.renderer.print_info(
-        "用法：/permissions [show|allow|deny|mode|reload|init] ..."
+        "用法：/permission [show|allow|deny|mode|reload|init] ..."
     )
     return CommandResult()
 
@@ -188,8 +193,8 @@ async def _permissions_show(ctx: CommandContext) -> CommandResult:
             ctx.renderer.print_info(f"  deny:  {r.raw}")
     elif not (session_allow or session_deny):
         ctx.renderer.print_info(
-            "（无任何规则。运行 /permissions init 创建模板，或 "
-            "/permissions allow \"...\" 添加临时规则。）"
+            "（无任何规则。运行 /permission init 创建模板，或 "
+            "/permission allow \"...\" 添加临时规则。）"
         )
     return CommandResult()
 
@@ -197,17 +202,12 @@ async def _permissions_show(ctx: CommandContext) -> CommandResult:
 async def _permissions_allow(
     ctx: CommandContext, args: list[str]
 ) -> CommandResult:
-    """添加一条会话级 allow 规则。
-
-    用法：/permissions allow "Bash(git *)"
-    """
     from mewcode.permissions.rules import parse_rule
 
     if not args:
-        ctx.renderer.print_info('用法：/permissions allow "Bash(git *)"')
+        ctx.renderer.print_info('用法：/permission allow "Bash(git *)"')
         return CommandResult()
     raw = " ".join(args).strip()
-    # 去掉首尾的引号（用户可能从 shell 习惯加引号）
     if (raw.startswith('"') and raw.endswith('"')) or (
         raw.startswith("'") and raw.endswith("'")
     ):
@@ -227,11 +227,10 @@ async def _permissions_allow(
 async def _permissions_deny(
     ctx: CommandContext, args: list[str]
 ) -> CommandResult:
-    """添加一条会话级 deny 规则。"""
     from mewcode.permissions.rules import parse_rule
 
     if not args:
-        ctx.renderer.print_info('用法：/permissions deny "Bash(rm *)"')
+        ctx.renderer.print_info('用法：/permission deny "Bash(rm *)"')
         return CommandResult()
     raw = " ".join(args).strip()
     if (raw.startswith('"') and raw.endswith('"')) or (
@@ -250,11 +249,10 @@ async def _permissions_deny(
 async def _permissions_mode(
     ctx: CommandContext, args: list[str]
 ) -> CommandResult:
-    """临时切换权限模式（覆盖文件级配置）。"""
     if not args:
         ctx.renderer.print_info(
             f"当前模式：{ctx.policy.mode}\n"
-            "用法：/permissions mode [strict|default|yolo]"
+            "用法：/permission mode [strict|default|yolo]"
         )
         return CommandResult()
     mode = args[0].lower()
@@ -273,7 +271,6 @@ async def _permissions_mode(
 
 
 async def _permissions_reload(ctx: CommandContext) -> CommandResult:
-    """重新加载三层 YAML，并清空所有会话级状态。"""
     ctx.policy.reload()
     ctx.renderer.print_info(
         f"已重新加载权限规则。当前模式：{ctx.policy.mode}"
@@ -282,9 +279,6 @@ async def _permissions_reload(ctx: CommandContext) -> CommandResult:
 
 
 async def _permissions_init(ctx: CommandContext) -> CommandResult:
-    """生成默认 permissions.yaml 模板，并把 local 文件加入 .gitignore。"""
-    from pathlib import Path
-
     cwd = ctx.policy.cwd if ctx.policy else Path.cwd()
     project_path = cwd / ".mewcode" / "permissions.yaml"
 
@@ -297,16 +291,13 @@ async def _permissions_init(ctx: CommandContext) -> CommandResult:
         project_path.write_text(_PERMISSIONS_TEMPLATE, encoding="utf-8")
         ctx.renderer.print_info(f"已生成 {project_path}")
 
-    # 同时把 local 文件加入 .gitignore（spec N11）
     gitignore = cwd / ".gitignore"
     line = ".mewcode/permissions.local.yaml"
     try:
         if gitignore.exists():
             content = gitignore.read_text(encoding="utf-8")
-            # 检查是否已存在该行（忽略首尾空格）
             existing_lines = {ln.strip() for ln in content.splitlines()}
             if line not in existing_lines:
-                # 追加（保持文件原有换行结尾）
                 if not content.endswith("\n"):
                     content += "\n"
                 content += f"{line}\n"
@@ -351,10 +342,6 @@ deny:
 
 
 async def _handle_instructions(ctx: CommandContext) -> CommandResult:
-    """/instructions [show|reload]
-
-    管理项目指令文件（AGENTS.md / CLAUDE.md / .mewcoderc）。
-    """
     loader = ctx.instructions
     if loader is None:
         ctx.renderer.print_info(
@@ -375,7 +362,6 @@ async def _handle_instructions(ctx: CommandContext) -> CommandResult:
 
 
 async def _instructions_show(ctx: CommandContext) -> CommandResult:
-    """打印当前生效的指令文本（spec F9）。"""
     text = ctx.instructions.current_text()
     if not text:
         ctx.renderer.print_info(
@@ -388,7 +374,6 @@ async def _instructions_show(ctx: CommandContext) -> CommandResult:
 
 
 async def _instructions_reload(ctx: CommandContext) -> CommandResult:
-    """重新加载三层文件，按 hash 比对决定是否重建 system_prompt（spec F10）。"""
     changed, new_text = ctx.instructions.reload_and_check()
 
     if not changed:
@@ -397,7 +382,6 @@ async def _instructions_reload(ctx: CommandContext) -> CommandResult:
         )
         return CommandResult()
 
-    # 内容变了 → 调 main 注入的 rebuild callable 重建 system_prompt
     rebuild = ctx.rebuild_system_prompt
     if callable(rebuild):
         rebuild(new_text)
@@ -419,13 +403,6 @@ async def _instructions_reload(ctx: CommandContext) -> CommandResult:
 
 
 async def _handle_compact(ctx: CommandContext) -> CommandResult:
-    """/compact [自定义指示]：手动触发上下文压缩。
-
-    spec F16 / Q9：
-    - 不带参数 → 默认摘要 prompt
-    - 带参数 → 用户指示拼接进 prompt 的"额外要求"段
-    - 失败不计入熔断（spec AC22）
-    """
     compactor = getattr(ctx, "compactor", None)
     if compactor is None:
         ctx.renderer.print_info("压缩系统未启用（启动时未注入 Compactor）。")
@@ -470,96 +447,245 @@ async def _handle_compact(ctx: CommandContext) -> CommandResult:
     return CommandResult()
 
 
+# ---------- /session new / /session resume（第十阶段 STATEFUL 子命令） ----------
+
+
+async def _handle_session_new(ctx: CommandContext) -> CommandResult:
+    """/session new：换发新 session_id，清空 messages。"""
+    archive = ctx.archive
+    if archive is None:
+        ctx.renderer.print_info("会话存档未启用。")
+        return CommandResult()
+    try:
+        # session.clear() 已经会调 _rotate_session_id；这里直接复用
+        ctx.session.clear()
+    except Exception as e:
+        ctx.renderer.print_info(f"⚠️ 切换新会话失败：{e}")
+        return CommandResult()
+    ctx.renderer.print_info(
+        f"已切换到新会话: {getattr(ctx.session, 'session_id', '(未知)')}"
+    )
+    return CommandResult()
+
+
+async def _handle_session_resume(ctx: CommandContext) -> CommandResult:
+    """/session resume <id>：加载指定会话并重建消息历史。"""
+    archive = ctx.archive
+    if archive is None:
+        ctx.renderer.print_info("会话存档未启用。")
+        return CommandResult()
+
+    # ctx.args 形如 ["resume", "<id>"] 或 ["resume"]
+    if len(ctx.args) < 2:
+        ctx.renderer.print_info("用法：/session resume <id>")
+        return CommandResult()
+
+    target = ctx.args[1]
+
+    # 先尝试精确命中
+    result = archive.load_by_id(target)
+    if not result.restored:
+        # 前缀模糊匹配
+        try:
+            matches = archive.find_by_prefix(target)
+        except Exception:
+            matches = []
+        if not matches:
+            ctx.renderer.print_info(f"找不到会话：{target}")
+            return CommandResult()
+        if len(matches) > 1:
+            ctx.renderer.print_info(
+                f"会话 id 模糊匹配多于 1 条：{matches}\n请提供更具体的 id。"
+            )
+            return CommandResult()
+        result = archive.load_by_id(matches[0])
+        if not result.restored:
+            ctx.renderer.print_info(f"无法恢复会话：{matches[0]}")
+            return CommandResult()
+
+    # 替换 session 状态
+    archive.attach(ctx.session, result)
+    ctx.renderer.print_info(
+        f"💾 已恢复会话: {result.session_id}（{len(result.messages)} 条消息）"
+    )
+    if result.bad_lines:
+        ctx.renderer.print_info(
+            f"⚠️ 会话恢复跳过 {result.bad_lines} 行损坏记录"
+        )
+    if result.truncated:
+        ctx.renderer.print_info(
+            "⚠️ 会话恢复检测到未配对工具调用，已截断到上一条完整消息"
+        )
+
+    # 触发记忆段刷新（如有）
+    rebuild = ctx.rebuild_system_prompt
+    if ctx.memory_manager is not None and callable(rebuild):
+        try:
+            ctx.memory_manager.refresh_system_prompt_if_changed(rebuild)
+        except Exception:
+            pass
+
+    return CommandResult()
+
+
+# ---------- /memory refresh（第十阶段 STATEFUL 子命令） ----------
+
+
+async def _handle_memory_refresh(ctx: CommandContext) -> CommandResult:
+    """/memory refresh：强制重读 notes 重建 index，按 hash 决定是否重建 system_prompt。"""
+    mm = ctx.memory_manager
+    if mm is None:
+        ctx.renderer.print_info("长期记忆未启用。")
+        return CommandResult()
+    rebuild = ctx.rebuild_system_prompt
+    try:
+        changed = await mm.refresh(rebuild_system_prompt=rebuild if callable(rebuild) else None)
+    except Exception as e:
+        ctx.renderer.print_info(f"⚠️ 刷新记忆失败：{e}")
+        return CommandResult()
+    if changed:
+        ctx.renderer.print_info("🧠 已刷新长期记忆索引（system prompt 已重建）。")
+    else:
+        ctx.renderer.print_info("🧠 已刷新长期记忆索引（hash 未变，未重建 system prompt）。")
+    return CommandResult()
+
+
 # ---------- 一次性注册 ----------
 
 
 def register_builtins() -> None:
-    """把所有内置命令写入全局 COMMANDS 表。幂等。"""
-    register(
-        Command(
-            name="exit",
-            aliases=("quit",),
-            description="退出 MewCode",
-            handler=_handle_exit,
-        )
-    )
-    register(
-        Command(
-            name="help",
-            aliases=(),
-            description="列出所有可用命令",
-            handler=_handle_help,
-        )
-    )
-    register(
-        Command(
-            name="clear",
-            aliases=(),
-            description="清空当前会话历史，开始新对话",
-            handler=_handle_clear,
-        )
-    )
-    register(
-        Command(
-            name="think",
-            aliases=(),
-            description="/think on|off — 开关 extended thinking（仅 anthropic）",
-            handler=_handle_think,
-        )
-    )
-    register(
-        Command(
-            name="providers",
-            aliases=(),
-            description="列出所有已配置的供应商",
-            handler=_handle_providers,
-        )
-    )
-    register(
-        Command(
-            name="provider",
-            aliases=(),
-            description="/provider <name> — 切换供应商（清空历史）",
-            handler=_handle_provider,
-        )
-    )
-    register(
-        Command(
-            name="plan",
-            aliases=(),
-            description="切换到 Plan Mode（只读工具）",
-            handler=_handle_plan,
-        )
-    )
-    register(
-        Command(
-            name="do",
-            aliases=(),
-            description="切回执行模式（全部工具）",
-            handler=_handle_do,
-        )
-    )
-    register(
-        Command(
-            name="permissions",
-            aliases=(),
-            description="管理权限规则与模式（show/allow/deny/mode/reload/init）",
-            handler=_handle_permissions,
-        )
-    )
-    register(
-        Command(
-            name="instructions",
-            aliases=(),
-            description="管理项目指令文件 AGENTS.md/CLAUDE.md（show/reload）",
-            handler=_handle_instructions,
-        )
-    )
-    register(
-        Command(
-            name="compact",
-            aliases=(),
-            description="手动触发上下文压缩（可附自定义指示）",
-            handler=_handle_compact,
-        )
-    )
+    """把所有内置命令写入全局 COMMANDS。
+
+    注册顺序无语义意义，按"用户认知频率"排，方便未来排查。
+    register() 内部对"同对象"幂等，所以本函数可被多次调用而不抛错。
+    """
+
+    # ---- LOCAL ----
+    register(Command(
+        name="help",
+        aliases=(),
+        description="列出所有可用命令",
+        handler=_handle_help,
+        type=CommandType.LOCAL,
+        usage="/help",
+    ))
+    register(Command(
+        name="status",
+        aliases=(),
+        description="查看当前会话与各子系统状态仪表盘",
+        handler=_handle_status,
+        type=CommandType.LOCAL,
+        usage="/status",
+    ))
+    register(Command(
+        name="providers",
+        aliases=(),
+        description="列出所有已配置的供应商",
+        handler=_handle_providers,
+        type=CommandType.LOCAL,
+        usage="/providers",
+        hidden=True,
+    ))
+
+    # ---- STATEFUL ----
+    register(Command(
+        name="exit",
+        aliases=("quit",),
+        description="退出 MewCode",
+        handler=_handle_exit,
+        type=CommandType.STATEFUL,
+        usage="/exit",
+    ))
+    register(Command(
+        name="clear",
+        aliases=(),
+        description="清空当前会话历史，开始新对话",
+        handler=_handle_clear,
+        type=CommandType.STATEFUL,
+        usage="/clear",
+    ))
+    register(Command(
+        name="plan",
+        aliases=(),
+        description="切换到 Plan Mode（只读工具）",
+        handler=_handle_plan,
+        type=CommandType.STATEFUL,
+        usage="/plan",
+    ))
+    register(Command(
+        name="do",
+        aliases=(),
+        description="切回执行模式（全部工具）",
+        handler=_handle_do,
+        type=CommandType.STATEFUL,
+        usage="/do",
+    ))
+    register(Command(
+        name="compact",
+        aliases=(),
+        description="手动触发上下文压缩（可附自定义指示）",
+        handler=_handle_compact,
+        type=CommandType.STATEFUL,
+        usage="/compact [自定义指示]",
+    ))
+    register(Command(
+        name="session",
+        aliases=(),
+        description="管理会话存档（list/current/new/resume）",
+        handler=_handle_session,
+        type=CommandType.STATEFUL,
+        usage="/session [list|current|new|resume <id>]",
+    ))
+    register(Command(
+        name="memory",
+        aliases=(),
+        description="管理长期记忆索引（show/list/refresh）",
+        handler=_handle_memory,
+        type=CommandType.STATEFUL,
+        usage="/memory [show|list [user|project]|refresh]",
+    ))
+    register(Command(
+        name="permission",
+        aliases=("permissions",),
+        description="管理权限规则与模式（show/allow/deny/mode/reload/init）",
+        handler=_handle_permission,
+        type=CommandType.STATEFUL,
+        usage="/permission [show|allow|deny|mode|reload|init]",
+    ))
+    register(Command(
+        name="think",
+        aliases=(),
+        description="/think on|off — 开关 extended thinking（仅 anthropic）",
+        handler=_handle_think,
+        type=CommandType.STATEFUL,
+        usage="/think on|off",
+        hidden=True,
+    ))
+    register(Command(
+        name="provider",
+        aliases=(),
+        description="/provider <name> — 切换供应商（清空历史）",
+        handler=_handle_provider,
+        type=CommandType.STATEFUL,
+        usage="/provider <name>",
+        hidden=True,
+    ))
+    register(Command(
+        name="instructions",
+        aliases=(),
+        description="管理项目指令文件 AGENTS.md/CLAUDE.md（show/reload）",
+        handler=_handle_instructions,
+        type=CommandType.STATEFUL,
+        usage="/instructions [show|reload]",
+        hidden=True,
+    ))
+
+    # ---- PROMPT ----
+    register(Command(
+        name="review",
+        aliases=(),
+        description="让 AI 对本轮对话的所有改动做一次自检（可附侧重点）",
+        handler=_handle_review,
+        type=CommandType.PROMPT,
+        usage="/review [侧重点]",
+    ))

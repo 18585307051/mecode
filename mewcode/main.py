@@ -23,6 +23,10 @@ from pathlib import Path
 from rich.console import Console
 
 from mewcode.chat import Session
+from mewcode.commands import (
+    CommandRegistrationError,
+    register_builtins as register_command_builtins,
+)
 from mewcode.config import ConfigError, load
 from mewcode.providers import build_provider
 from mewcode.render import Renderer
@@ -159,6 +163,15 @@ def main() -> int:
 
     console = Console()
     renderer = Renderer(console)
+
+    # 阶段 0：在最早期注册斜杠命令（spec 第十阶段 F2 / AC15）。
+    # 撞名 / 自反 / 非法 type 等注册期错误必须在装配对象图之前暴露，
+    # 单行红字 + 退出码 1，不打 traceback。
+    try:
+        register_command_builtins()
+    except CommandRegistrationError as e:
+        renderer.print_error("CommandRegistration", str(e))
+        return 1
 
     # 阶段 1：加载配置
     try:

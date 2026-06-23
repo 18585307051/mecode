@@ -25,9 +25,23 @@ from mewcode.commands import (
 )
 from mewcode.config import AppConfig
 from mewcode.render import Renderer
+from mewcode.repl.completer import SlashCommandCompleter
 from mewcode.tools import Confirmer, Sandbox, ToolRegistry
 
-PROMPT = "> "
+
+def _make_prompt(session) -> str:
+    """根据 session.mode 动态生成 PROMPT 字符串（spec 第十阶段 F14）。
+
+    PLAN 模式显示 `[PLAN] > ` 前缀，提醒用户当前只读工具可用；
+    其它模式（default / do / 未设置）保持 `> `，避免视觉噪音。
+
+    设计动机：PLAN 模式下若用户忘记切回会写出无法执行的改文件请求，
+    持久前缀解决这个唯一高风险场景；thinking / yolo 等状态可随时
+    用 /status 查看，不进 PROMPT。
+    """
+    if getattr(session, "mode", "do") == "plan":
+        return "[PLAN] > "
+    return "> "
 
 
 async def run_repl(
@@ -68,7 +82,7 @@ async def run_repl(
     Returns:
         进程退出码：0 = 正常退出。
     """
-    # 注册内置命令（幂等）
+    # 注册内置命令（幂等；main 通常已先注册过一次）
     register_builtins()
 
     # 启动横幅与提示
@@ -79,13 +93,13 @@ async def run_repl(
     )
     renderer.print_help_hint(["/help", "/exit"])
 
-    pt_session: PromptSession = PromptSession()
+    pt_session: PromptSession = PromptSession(completer=SlashCommandCompleter())
     ctrl_c_pending = False
 
     while True:
         # 1. 读取一行输入
         try:
-            line = await pt_session.prompt_async(PROMPT)
+            line = await pt_session.prompt_async(_make_prompt(session))
         except EOFError:
             # Ctrl+D / Ctrl+Z → 当 /exit
             return 0
@@ -128,6 +142,8 @@ async def run_repl(
             instructions=instructions,
             rebuild_system_prompt=rebuild_system_prompt,
             compactor=compactor,
+            archive=archive,
+            memory_manager=memory_manager,
         )
         try:
             result = await dispatch(line, ctx)
@@ -137,6 +153,23 @@ async def run_repl(
         if result is not None:
             if result.should_exit:
                 return 0
+            # 第十阶段 F5 / F12：PROMPT 类命令把构造好的"伪用户输入"
+            # 放在 prompt_text；REPL 把它当成普通用户输入注入 run_turn。
+            if result.prompt_text is not None:
+                try:
+                    await run_turn(
+                        session, result.prompt_text, renderer,
+                        registry=registry,
+                        confirmer=confirmer,
+                        sandbox=sandbox,
+                        policy=policy,
+                        asker=asker,
+                        compactor=compactor,
+                        memory_manager=memory_manager,
+                        rebuild_system_prompt=rebuild_system_prompt,
+                    )
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    pass
             continue
 
         # 5. 对话分支：透传 registry/sandbox/confirmer + 第五阶段 policy/asker
