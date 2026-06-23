@@ -95,9 +95,9 @@ def main() -> None:
             assert text2 is not None
             assert "### 用户全局规则" in text2
             assert "### 项目规则" in text2
-            # 用户在前
-            assert text2.index("用户全局规则") < text2.index("项目规则")
-            print("    用户级 → 项目级 顺序 ✓")
+            # 第九阶段 F1：项目级排在用户级前面（高优先级在前）
+            assert text2.index("项目规则") < text2.index("用户全局规则")
+            print("    项目级 → 用户级 顺序 ✓")
 
     print("\n✓ 项目指令端到端通过")
 

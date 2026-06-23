@@ -1,561 +1,478 @@
-# MewCode 第八阶段 Spec
+# MewCode 第九阶段 Spec：会话恢复与长期记忆
 
 ## 背景
 
-第七阶段交付了项目指令文件加载（docs/08/）。MewCode 现在每个 turn 都
-有完整的 system prompt + Agent Loop + 权限系统 + MCP 工具 + 项目规则
-注入——能干长任务的完整能力。
+前八个阶段已经交付了 MewCode 的核心 Agent 能力：
 
-但**长任务有个隐藏天敌：context window**。
+- System Prompt 构建与环境感知
+- 多轮 Agent Loop 与工具调用闭环
+- Plan/Do 模式、权限系统、MCP、项目指令文件
+- 上下文压缩与超大工具结果存盘
 
-实测场景：
-- 模型 read 一个 5KB 的源文件 → tool_result 占 ~1500 token
-- 模型 search "TODO" 拿到 30 个匹配 → tool_result 占 ~3000 token
-- Agent Loop 跑 10 个 turn 解一个 bug → 累计 ~50K token
-- 跑 30 个 turn 重构一个模块 → 累计接近 100K
-- 大模型 deepseek-v4-pro 的 input window 是 128K——再跑下去就崩了
+但当前体验仍有一个根本短板：**每次启动都像第一次见面**。
 
-第六到第七阶段的 prompt cache 解决了**重复发送相同内容**的费用问题，
-但解决不了**总 token 持续增长**的硬上限问题。
+用户已经告诉过 Agent 的偏好、项目里的技术约定、之前做到哪一步、某个方案为什么被否决，这些信息如果只存在当前进程内，一旦重启或中断，Agent 就需要重新探索、重新询问、重新犯同样的错。
 
-第八阶段为 MewCode 装上**两层上下文压缩**：
+第九阶段的目标是让 MewCode 在新会话启动时自动恢复项目知识和用户偏好，让 Agent 从「每次失忆」变成「越用越懂你」。实现上分三层：
 
-```
-┌─────────────────────────────────┐
-│  第一层：轻量预防                 │  每次请求前都跑
-│  - 单工具结果 > 10KB → 存盘+预览  │  - 单消息和 > 25KB → 排序存盘     │
-│  → 修改 session.messages 内的     │
-│    ToolResultBlock content        │
-└──────────────┬──────────────────┘
-              │
-               ▼
-┌─────────────────────────────────┐
-│  第二层：重量兜底                  │  接近 window 才跑│  - LLM 摘要早期消息              │
-│  - 保留近期原文                  │  - 失败 3 次熔断                 │
-│  → 替换 session.messages 早期部分 │
-│    + 保留近期 + 加边界 reminder   │
-└─────────────────────────────────┘
-```
+1. **项目指令文件增强**：支持更清晰的多层优先级与 `@include`。
+2. **会话 JSONL 存档与恢复**：中断后能从最近会话继续。
+3. **自动笔记与记忆索引**：把偏好、纠正、项目知识、参考资料沉淀为长期记忆。
+
+本阶段不做向量数据库、RAG 检索、团队记忆同步。
 
 ## 目标
 
-- token 估算用"锚定 + 增量"策略：上次 API 实测值 + 本次新增的字符 / 3
-  估算
-- 第一层：每次请求前遍历最新一条 tool_results 消息，超阈值的工具结果
-  存盘到 `<cwd>/.mewcode/transcripts/<session_id>/`，对话内容替换为
-  `[已存盘 + 前后预览]`
-- 第二层：估算总 token 达到 (window - 13K) 时自动触发摘要；
-  `/compact` 命令可手动触发，余量收窄到 3K
-- 摘要 prompt 强制：禁调工具 / 先草稿后正式 / 5 段中文结构
-- 摘要后构造新 messages：摘要 user 消息（含 system-reminder）+ 近期
-  保留区（尾部 10K token 或至少 5 条 + 完整 turn 边界扩展）
-- 熔断：连续 3 次失败本会话停用，/clear 重置
-- 用户原始 user 消息的 TextBlock 永远不被摘要改写——只可能被存盘+预览
-  的是工具结果
-- /compact [自定义指示] 命令支持
-- 第一/二/三/四/五/六/七阶段功能不退化
+- 项目指令文件支持三层优先级，项目级高于用户级，高优先级内容排在前面。
+- 项目指令文件支持 `@include <path>` 引用其他 Markdown 文件。
+- `@include` 必须限制嵌套深度、用 visited 集合防环路、拦截跳出允许根目录的路径。
+- 会话历史以 JSONL 追加写入项目会话目录；恢复时能跳过坏行。
+- 不维护独立 meta 文件；会话 ID、标题、消息数、更新时间等需要时直接扫描 JSONL 计算。
+- 会话恢复能处理坏行、孤儿工具调用、token 超限、长时间间隔提醒和 30 天过期清理。
+- 自动笔记分四类：用户偏好、纠正反馈、项目知识、参考资料。
+- 每轮 Agent Loop 自然停下后（模型最终回复无工具调用时）异步调用 LLM 更新笔记。
+- 用户级记忆与项目级记忆分开存储。
+- 处理请求前注入记忆索引，让 Agent 像已经读过长期记忆一样工作。
+- 记忆索引文件控制在 200 行 / 25KB 以内，约 2-3K tokens。
+- 第一至第八阶段功能不退化。
 
 ## 功能需求
 
-### F1. token 估算（spec Q1 / D1）
+### F1. 项目指令三层加载与优先级
 
-新增 `mewcode/compaction/tokens.py` 模块：
+项目指令文件仍使用 Markdown，加载三层：
 
-```python
-def estimate_tokens(
-    messages: list[Message],
-    last_usage_input_tokens: int = 0,
-    anchor_message_count: int = 0,
-) -> int:
-    """估算当前 messages 的 input_tokens。
+| 优先级 | 层级 | 路径 | 说明 |
+|---|---|---|---|
+| 1 最高 | 项目本地级 | `<cwd>/.mewcode/AGENTS.local.md` 或 `CLAUDE.local.md` | 本机/当前项目私有规则 |
+| 2 | 项目共享级 | `<cwd>/AGENTS.md` 或 `CLAUDE.md` 或 `.mewcoderc` | 项目团队共享规则 |
+| 3 最低 | 用户全局级 | `~/.mewcode/AGENTS.md` 或 `CLAUDE.md` 或 `.mewcoderc` | 用户全局偏好 |
 
-    策略：
-    - last_usage_input_tokens：上一次 API 响应实测值
-    - anchor_message_count：上次响应时 messages 列表长度（锚点）
-    - 锚点之后的新增消息按字符 / 3 估算
+合并规则：
 
-    Returns:
-        估算 token 数（含 system_prompt 不计；调用方在 session 层面处理）
-    """
+- 高优先级排在前面：项目本地级 → 项目共享级 → 用户全局级。
+- 仍是拼接，不是覆盖；如果存在冲突，System Prompt 明确提示模型优先遵循靠前内容。
+- 某层缺失则跳过，不输出空标题。
+- 三层全空时返回 `None`，不注入自定义指令段。
+
+### F2. 项目指令 `@include` 引用
+
+指令文件支持行级 include：
+
+```markdown
+@include docs/ai-rules.md
+@include .mewcode/local-extra.md
 ```
 
-- 无 last_usage 时（首次请求 / 切 provider 后）→ 全部 messages 走字符
-  估算
-- 有锚点时 → 锚点之前的部分相信 last_usage_input_tokens；之后的部分
-  按字符估算
-- 字符 / 3 是经验系数：英文偏保守，中文较准（中文 1 char ≈ 1.5-2
-  token）
+解析规则：
 
-### F2. session 字段扩展
+- 只识别独占一行的 `@include <path>`。
+- `<path>` 相对当前指令文件所在目录解析。
+- include 的文件内容在原位置展开，并用来源注释包裹：
 
-`mewcode/chat/session.py` 增加：
-
-```python
-@dataclass
-class Session:
-    ...
-    # 第八阶段
-    last_usage_input_tokens: int = 0      # 上次 API 响应实测
-    last_anchor_message_count: int = 0    # 上次响应时 messages 长度
-    compaction_failures: int = 0          # 连续失败计数
-    compaction_disabled: bool = False     # 熔断标志
-    session_id: str = ""                  # 启动时间戳，存盘目录用
+```markdown
+<!-- begin include: docs/ai-rules.md -->
+...
+<!-- end include: docs/ai-rules.md -->
 ```
 
-session_id 由 main.py 启动时构造（`datetime.now().strftime("%Y%m%d_%H%M%S")`）。
+安全规则：
 
-`clear()` 与 `switch_provider()` 重置全部 compaction 状态（含
-session_id 重新生成？否——session_id 表示启动时间，不变；但
-failures / disabled 重置）。
+- 最大嵌套深度为 3。
+- 使用 resolved absolute path 的 visited 集合防止环路。
+- 项目级文件的 include 只能指向 `<cwd>` 内部。
+- 用户全局级文件的 include 只能指向 `~/.mewcode` 内部。
+- include 指向不存在、目录、非 UTF-8 或越界路径时 warning 后跳过，不阻塞启动。
+- include 文件同样受单文件 8KB 限制。
 
-`stream_chat` 完成后，chat.engine 把本次 Usage 的 input_tokens 写入
-`last_usage_input_tokens`，并把当时的 messages 长度写入
-`last_anchor_message_count`。
+### F3. 会话 ID 与存储目录
 
-### F3. 第一层：单工具结果存盘（spec F1 第一层 / Q2 / Q3 / Q4）
+会话存档放在项目目录：
 
-每次请求前，遍历 session.messages 中**最新一条 tool_results 消息**
-（role=user 含 ToolResultBlock）的所有 ToolResultBlock：
-
-```
-对每个 ToolResultBlock：
-  if len(block.content) > 10240:    # 10KB
-      存盘到 .mewcode/transcripts/<session_id>/tool_<turn>_<tool_use_id>.txt
-      block 替换为 [前 20 行 + ... + 后 5 行 + 提示重新读取]
+```text
+<cwd>/.mewcode/sessions/<session_id>.jsonl
 ```
 
-### F4. 第一层：单消息总和限制（spec F3 触发条件 2）
+会话 ID 格式：
 
-如果上述步骤后**该消息所有 ToolResultBlock 总字节** > 25KB：
-
-```
-按 content 字节数从大到小排序
-依次取最大的，存盘 + 替换为预览
-直到剩余总字节 <= 25KB 或所有都已存盘
+```text
+YYYYMMDD-HHMMSS-xxxx
 ```
 
-注：单工具 ≤ 10KB 但和 > 25KB 的场景才会走这条路（如 5 个 7KB 的工具
-结果在同一消息内）。
+其中：
 
-### F5. 存盘文件格式
+- 时间戳精确到秒。
+- `xxxx` 是 4 位随机十六进制或 base36 字符串，用于防止同秒撞车。
+- 新启动如果没有可恢复会话，则生成新 ID。
+- 恢复已有会话时保留原 ID，继续向同一个 JSONL 文件追加。
 
-文件路径：`<cwd>/.mewcode/transcripts/<session_id>/tool_<msg_idx>_<tool_use_id>.txt`
+### F4. JSONL 追加写会话消息
 
-文件内容：原始 ToolResultBlock.content 的纯字符串（不加前缀）。
+每条会话消息追加为一行 JSON：
 
-### F6. 替换后的预览格式（spec Q4 / D4）
-
-```
-[工具结果已存盘到 .mewcode/transcripts/<session_id>/tool_<msg_idx>_<tool_use_id>.txt (12.3KB)]
-
-—— 前 20 行 ——
-<前 20 行>
-
-—— 后 5 行 ——
-<后 5 行>
-
-完整内容请用 read 工具读取上述文件路径。
+```json
+{"type":"message","ts":"2026-06-23T10:15:30+08:00","role":"user","content":[...]}
 ```
 
-如果原内容总行数 ≤ 25 行（前 20 + 后 5 = 25），不截取直接保留全文+
-路径标注（避免反向放大）。
+要求：
 
-### F7. session_id 与目录管理
+- 每次 `Session.append_user_text` / `append_assistant` / `append_tool_results` 成功后追加一行。
+- 使用 append 模式写入，写完 flush；不要求每行 fsync。
+- 崩溃最多丢最后一行或产生最后一行坏行。
+- 只记录消息本身，不维护额外 meta 文件。
+- Message.content 使用现有 ContentBlock 结构可逆序列化。
 
-启动时 main.py 构造：
-```python
-session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-session.session_id = session_id
+### F5. 不维护 meta 文件，扫描 JSONL 计算摘要
+
+需要展示或选择会话时，通过扫描 JSONL 计算：
+
+- `session_id`：文件名去掉 `.jsonl`。
+- `title`：第一条真实 user 文本的前 40 个字符；没有则使用「未命名会话」。
+- `message_count`：成功解析并保留的 message 行数。
+- `created_at`：第一条有效 message 的 ts；没有则文件 mtime。
+- `updated_at`：最后一条有效 message 的 ts；没有则文件 mtime。
+
+禁止新增 `sessions/meta.json`、`index.json` 等需要同步维护的状态文件。
+
+### F6. 启动自动恢复最近有效会话
+
+启动时执行：
+
+1. 清理超过 30 天的过期会话文件。
+2. 扫描 `<cwd>/.mewcode/sessions/*.jsonl`。
+3. 选择最近更新且未过期的会话。
+4. 尝试恢复其 messages。
+5. 如果没有可恢复会话或恢复后为空，则创建新会话。
+
+恢复成功时打印横幅：
+
+```text
+💾 已恢复会话: 20260623-101530-a3f9（23 条消息，标题：修复 MCP 超时）
 ```
 
-存盘目录由第一层在首次需要存盘时按需创建：
-```python
-target_dir = cwd / ".mewcode" / "transcripts" / session_id
-target_dir.mkdir(parents=True, exist_ok=True)
+新会话时不打印恢复横幅或打印简短提示均可，但不得制造噪音。
+
+### F7. 恢复时跳过坏行
+
+读取 JSONL 时：
+
+- 单行 JSON 解析失败 → 跳过该行并计数。
+- 行内缺少必要字段或 ContentBlock 无法反序列化 → 跳过该行并计数。
+- 坏行不得导致整个会话恢复失败。
+- 恢复结束后如有坏行，打印 warning：
+
+```text
+⚠️ 会话恢复跳过 2 行损坏记录
 ```
 
-不在启动时创建空目录（避免 .mewcode/ 多无用文件夹）。
+### F8. 恢复时处理孤儿工具调用
 
-退出时**不清理**——transcripts 目录由用户手动维护（可加 .gitignore）。
+恢复完成后必须保证消息历史满足工具调用配对约束：
 
-### F8. 第二层：估算阈值（spec Q5 / D5）
+- assistant 消息中如果包含 ToolUseBlock，后续必须存在紧跟的 user tool_results 消息，且 tool_use_id 全部覆盖。
+- 如果结尾出现 assistant tool_use 但没有匹配 tool_results，截断到该 assistant 之前。
+- 如果 tool_results 缺少对应 assistant tool_use，截断到该 tool_results 之前。
+- 截断时打印 warning：
 
-provider 增加 `context_window: int` 字段（部分已知模型给默认值）：
-
-| Provider/Model | window |
-|----------------|--------|
-| anthropic claude-3-5-sonnet | 200000 |
-| anthropic claude-3-7-sonnet | 200000 |
-| openai gpt-4o | 128000 |
-| openai gpt-4-turbo | 128000 |
-| deepseek-v4-pro | 128000 |
-| 未知 | 128000 (保守默认) |
-
-session 字段：
-- `auto_compact_threshold = window - 13000`
-- `manual_compact_threshold = window - 3000`
-
-启动时 main 用 provider.context_window 计算填入 session。
-
-### F9. 第二层：触发判定
-
-每次 run_turn 入口（第一层之后）：
-
-```
-estimated = estimate_tokens(...)
-
-if 用户调 /compact:
-    if estimated >= manual_threshold:
-        触发摘要
-    else:
-        触发摘要（用户手动要压，必触发，但 prompt 提示"当前 token 不高，
-                确认压缩？"——简化：直接触发不询问）
-
-elif estimated >= auto_compact_threshold:
-    if not compaction_disabled:
-        触发摘要
-
-else:
-    跳过
+```text
+⚠️ 会话恢复检测到未配对工具调用，已截断到上一条完整消息
 ```
 
-**简化**：手动触发时不做"低 token 警告"——用户既然主动调就执行。
+### F9. 恢复后 token 超限先压一次
 
-### F10. 第二层：近期保留区计算（spec Q6 / Q13 / D6 / D13）
+恢复会话后、第一次发送请求前：
 
-```python
-def compute_keep_boundary(messages, last_usage, anchor_count) -> int:
-    """从尾部往回数 10K token，至少 5 条；扩展到完整 turn 边界。
+- 使用第八阶段 `Compactor` 的估算逻辑计算消息 token。
+- 如果估算超过自动压缩阈值，则先触发一次 compaction。
+- 压缩成功后再进入正常对话。
+- 压缩失败时不阻塞启动，但应打印 warning，并允许用户 `/clear` 或继续尝试。
 
-    Returns:
-        keep_start_index：[keep_start_index:] 是保留区
-    """
-    # 1. 从尾部向前累加 token，达到 10K 或至少 5 条
-    # 2. 扩展边界：往前移动 keep_start_index 直到指向一个真实用户消息
-    #    （role=user 且 content 不含 ToolResultBlock）
-    # 3. 不允许 keep_start_index == 0（至少要压缩一些东西）；
-    #    如果整个历史都不够 10K，跳过摘要直接给警告
-```
+### F10. 长时间间隔提醒
 
-### F11. 第二层：摘要 LLM 调用
+如果恢复的会话距离最后一条消息已经超过 24 小时，则在 messages 尾部追加一条 user `TextBlock` 系统提醒：
 
-调当前 session.provider.stream_chat：
-
-```python
-# 临时构造 messages：[user 消息（含历史文本 + 摘要要求）]
-# 不传 tools_format（等价于 tools=[]）→ 强制模型不调工具
-# 不传 system 字段（用单独的摘要专用 system）
-
-await provider.stream_chat(
-    [Message(role="user", content=[TextBlock(text=user_prompt)])],
-    thinking=False,
-    system=COMPACTION_SYSTEM_PROMPT,
-    tools_format=None,
-)
-```
-
-收集所有 TextDelta → 完整摘要文本 → 解析 `<summary>` 标签提取正式
-摘要部分。
-
-### F12. 摘要 prompt 内容（spec Q7 / Q14 / D7）
-
-**system prompt**（英文约束 + 中文结构）：
-
-```
-You are conducting a conversation summarization task. Your output will
-REPLACE the early portion of a conversation history.
-
-CRITICAL CONSTRAINTS:
-- DO NOT call any tools. This is a summarization task only.
-- DO NOT generate code. Describe what was done, not how.
-- First write your <analysis> draft (free thinking), then write the
-  final <summary>.
-
-The <analysis> section is for your reasoning—it will be discarded.
-The <summary> section is what gets retained. Use these EXACT 5
-subsections in Chinese:
-
-<summary>
-## 会话目标
-（用户最初想完成什么？1-2 句话）
-
-## 关键决策
-（重要的技术选择、约定、推翻的方案）
-
-## 代码变更
-（已修改的文件 + 大致改了什么；不要贴代码）
-
-## 未完成事项
-（TODO、失败的尝试、待验证的假设）
-
-## 当前状态
-（走到哪一步，下一步应当做什么）
-</summary>
-```
-
-**user prompt**：
-
-```
-以下是需要摘要的对话历史（早期部分）：
-
-[messages 序列化为可读文本，按 turn 分段]
-
-[如果 /compact 带了用户指示]
-额外要求：
-{user_instruction}
-```
-
-### F13. 摘要解析
-
-```python
-def extract_summary(llm_output: str) -> str | None:
-    """提取 <summary>...</summary> 之间的内容。
-
-    失败条件：
-    - 找不到 <summary> 标签
-    - <summary> 内容为空
-    - 5 段标题至少缺 3 个
-
-    Returns:
-        摘要文本 or None（失败）
-    """
-```
-
-失败 → 返回 None → 触发熔断计数 +1。
-
-### F14. 摘要后的 messages 重组（spec Q8 / D8）
-
-```python
-new_messages = [
-    Message(role="user", content=[TextBlock(text=BOUNDARY_REMINDER)]),
-    *messages[keep_start_index:],
-]
-```
-
-`BOUNDARY_REMINDER` 内容：
-
-```
+```text
 <system-reminder>
-[Context Compacted]
-上面是早期对话的摘要（从 X 条消息压缩而来）。
-重要：完整文件内容请重新用 read 工具读取，不要从摘要中脑补具体代码。
-压缩时间：YYYY-MM-DD HH:MM:SS
-
-{summary_text}
+距离上次会话已过去 3 天 4 小时。请先根据已恢复的上下文继续，不确定的信息应重新读取文件确认。
 </system-reminder>
 ```
 
-注意：BOUNDARY_REMINDER 是 user 消息的 TextBlock，会进入正常的对话流。
-不是 system_prompt 的一部分（保持 system_prompt 稳定，cache 不失效）。
+要求：
 
-session.messages 在原地替换：
-```python
-session.messages = new_messages
+- 该提醒也写入 JSONL，避免同一次恢复重复插入。
+- 如果最后一条消息已经是同类时间跨度提醒，则不重复插入。
+
+### F11. 30 天以上过期会话清理
+
+启动时清理：
+
+- `updated_at` 距当前时间超过 30 天的 `.jsonl` 文件。
+- 清理只删除 JSONL 会话文件，不删除 transcripts 或 memory。
+- 删除失败 warning 后继续启动。
+
+### F12. 自动笔记分类
+
+自动笔记分四类：
+
+| category | 中文名 | 例子 | 默认存储范围 |
+|---|---|---|---|
+| `preference` | 用户偏好 | 用户喜欢中文回答、偏好先给结论 | 用户级 |
+| `correction` | 纠正反馈 | 用户指出某做法错误、命名习惯不对 | 用户级 |
+| `project_knowledge` | 项目知识 | 架构约定、模块职责、测试命令 | 项目级 |
+| `reference` | 参考资料 | 用户给的链接、文档路径、外部 API 说明 | 项目级，除非明显是用户全局资料 |
+
+### F13. 自动笔记文件格式
+
+用户级笔记目录：
+
+```text
+~/.mewcode/memory/notes/*.md
+~/.mewcode/memory/index.md
 ```
 
-last_usage_input_tokens 与 last_anchor_message_count 重置（下次请求重
-新锚定）。
+项目级笔记目录：
 
-### F15. 熔断机制（spec Q10 / D10）
-
-每次第二层失败：
-- `session.compaction_failures += 1`
-- 失败原因：LLM 错误 / 解析失败 / 网络错
-
-达到 3 次：
-- `session.compaction_disabled = True`
-- 打印警告：`⚠️ 压缩连续失败 3 次，已停用本会话压缩功能。请 /clear 清空历史或重启 mewcode。`
-
-`/clear` 与 `switch_provider`：重置 failures = 0、disabled = False。
-
-成功一次后：failures 重置为 0。
-
-### F16. /compact 命令
-
-```
-/compact                     默认压缩
-/compact <自定义指示>         压缩，附加用户指示到 prompt
+```text
+<cwd>/.mewcode/memory/notes/*.md
+<cwd>/.mewcode/memory/index.md
 ```
 
-实现：
-- 读 ctx.args 拼成 user_instruction
-- 调 compactor.compact_now(session, instruction)
-- 成功 → 打印 `已压缩。压缩前 X 条消息 / Y tokens → 压缩后 Z 条 / 估算 W tokens。`
-- 失败 → 打印失败原因（不计入熔断；用户手动调用的失败不熔断）
+每条笔记一个带 frontmatter 的 Markdown：
 
-注：熔断计数仅在**自动触发**失败时累加；手动触发失败不计入（用户已经
-明确决定要压，重试是用户的选择）。
+```markdown
+---
+id: mem_20260623_101530_a3f9
+scope: project
+category: project_knowledge
+created_at: 2026-06-23T10:15:30+08:00
+updated_at: 2026-06-23T10:15:30+08:00
+source_session: 20260623-101530-a3f9
+tags: [testing, mcp]
+---
 
-### F17. 不做的事
+项目的 MCP 验证脚本是 `python scripts/verify_mcp.py`，通过后才能认为 MCP 集成不退化。
+```
 
-明确不做：
-- 精确 tokenizer（tiktoken / sentencepiece）
-- 自定义压缩策略配置文件
-- 摘要风格的 ML 优化
-- 摘要 cache（每次都是全新调用）
-- 跨会话保留摘要历史
-- 工具结果存盘的清理策略（用户手动管）
-- 第二层触发后再跑第一层（一次请求只跑一次第二层）
-- 主动重新读取存盘文件并合并回历史（让模型自己 read）
-- /compact threshold 配置命令（保持简单）
-- 用单独 provider 做摘要
+### F14. 自动笔记更新时机
+
+每轮 Agent Loop 自然停下后触发异步更新：
+
+- 条件：模型最终回复没有 tool_use，即 `Stopped(reason="natural")`。
+- 不在工具调用中间更新，避免记录半成品。
+- 使用 `asyncio.create_task(...)` 后台执行，不阻塞下一次用户输入。
+- 只给 LLM 最近一轮关键上下文、现有 memory index、必要的 session 摘要，不把全量历史塞给记忆更新。
+- 失败只 warning，不影响主对话。
+
+### F15. 自动笔记去重交给 LLM 判断
+
+更新记忆时让 LLM 输出操作建议：
+
+- `create`：新增笔记。
+- `update`：更新已有笔记。
+- `delete`：删除明显错误或被用户否定的笔记。
+- `noop`：无需更新。
+
+去重策略交给 LLM：
+
+- 如果新事实与已有笔记等价，应 update 或 noop，而不是 create。
+- 如果用户纠正了旧记忆，应 update 原笔记并保留 updated_at。
+- 程序只负责校验输出格式、路径安全和文件写入。
+
+### F16. 记忆索引构建与限制
+
+`index.md` 是注入上下文的唯一长期记忆入口。
+
+要求：
+
+- 每次笔记变更后重建对应 scope 的 index。
+- index 控制在 200 行以内。
+- index 控制在 25KB 以内。
+- 超限时按优先级保留：纠正反馈 > 用户偏好 > 项目知识 > 参考资料；同类按 updated_at 倒序。
+- index 内容应简洁，按分类组织，包含笔记 ID 便于后续 update。
+
+### F17. 请求前注入记忆索引
+
+每次处理用户请求前读取：
+
+1. 用户级 `~/.mewcode/memory/index.md`
+2. 项目级 `<cwd>/.mewcode/memory/index.md`
+
+拼接后注入上下文：
+
+```markdown
+## 长期记忆
+以下是已记录的用户偏好和项目知识。项目级记忆优先于用户级记忆；如与当前用户明确指示冲突，以当前用户指示为准。
+
+### 项目记忆
+...
+
+### 用户记忆
+...
+```
+
+实现上可复用 `build_system_prompt(..., memory=...)` 的预留参数。为减少 prompt cache 破坏，只有 memory hash 变化时才重建 `session.system_prompt`。
+
+### F18. 用户级与项目级记忆分开存
+
+- 用户偏好和纠正反馈默认写用户级。
+- 项目知识默认写项目级。
+- 参考资料默认写项目级。
+- 如果 LLM 输出的 scope 与 category 明显冲突，程序可按默认规则纠正。
+- 项目级文件不得写到 `<cwd>` 之外；用户级文件不得写到 `~/.mewcode` 之外。
+
+### F19. 不做的事
+
+本阶段明确不做：
+
+- 向量数据库。
+- RAG 检索。
+- embedding。
+- 团队记忆同步。
+- 云端记忆同步。
+- 记忆 Web UI。
+- 复杂权限审批流。
+- 自动总结所有历史会话生成知识库。
+- 对 transcripts 做生命周期清理。
+- 精确 tokenizer。
 
 ## 非功能需求
 
 ### N1. 模块边界
 
-- 新模块 `mewcode/compaction/`：
-  - `__init__.py`：暴露公共 API
-  - `tokens.py`：estimate_tokens + serialize_message
-  - `lightweight.py`：第一层预防（单工具/单消息）
-  - `summarizer.py`：第二层重量摘要 LLM 调用 + prompt 构造
-  - `compactor.py`：组合两层 + 状态管理（Compactor 类）
-- chat.engine 在 run_turn 入口调 compactor.before_request(session)
-- chat.engine 在 stream_chat 完成后调 compactor.update_anchor(session, usage)
-- commands/builtin.py 新增 /compact handler
-- 不动的模块：
-  - providers / render / permissions / mcp / instructions / system_prompt
-    全部零修改
-  - tools 模块零修改
-- session.py 增加字段（不破坏现有签名）
+新增模块建议：
+
+- `mewcode/sessions/`
+  - `archive.py`：JSONL 追加写、扫描、恢复、清理。
+  - `codec.py`：Message/ContentBlock 序列化与反序列化。
+- `mewcode/memory/`
+  - `notes.py`：Note 数据结构、frontmatter 读写。
+  - `index.py`：index.md 重建与限制。
+  - `manager.py`：请求前注入、后台更新调度。
+  - `updater.py`：LLM 更新记忆的 prompt 与输出解析。
+- `mewcode/instructions/loader.py` 扩展 include 与新优先级。
 
 ### N2. 不引入新依赖
 
-仍仅 prompt_toolkit / rich / PyYAML / httpx 4 项。
-token 估算用纯字符；存盘用 stdlib pathlib + datetime。
+继续只使用现有依赖。JSONL、frontmatter、路径处理、时间处理均用 Python stdlib 实现。
 
 ### N3. 中文优先
 
-错误提示、warning、命令文档、5 段摘要标题中文。
-摘要 system prompt 关键约束用英文（语气更严，避免模型软化执行）。
+用户可见 warning、横幅、命令说明、记忆更新提示均使用中文。
 
-### N4. 单测覆盖（spec Q15）
+### N4. 崩溃安全
 
-约 22 个新测试：
-1. token 估算（3）
-2. 第一层预防（5）
-3. 第二层兜底（6）
-4. 熔断（3）
-5. /compact 命令（3）
-6. 集成（2）
+- JSONL 追加写保证崩溃最多影响最后一行。
+- 恢复时坏行跳过。
+- 记忆笔记写入使用临时文件 + replace，避免半写文件破坏笔记。
 
-### N5. 不退化
+### N5. Windows 兼容
 
-- 320 个已有单测全过
-- 9 个端到端脚本仍通过
-- run_turn / Provider / ToolRegistry / Sandbox / PermissionPolicy /
-  MCP / InstructionsLoader 接口不变
-- 无需要压缩的场景（短对话）下 mewcode 行为完全等同第七阶段
-- prompt cache 命中：第一层不破坏 cache（system 不变）；第二层会破
-  cache 一次（messages 大改），这是预期成本
+- 路径使用 `pathlib.Path`。
+- 文件统一 UTF-8。
+- 会话 ID 不使用 Windows 非法字符。
+- JSONL 与 Markdown 在 Windows PowerShell / CMD 下可读写。
 
-### N6. Windows 兼容
+### N6. 性能
 
-- session_id 时间戳跨平台
-- 文件路径用 pathlib
-- 中文摘要标题在 Windows GBK 控制台不崩（已通过 _fix_windows_console
-  保证）
+- 启动扫描 30 天内 JSONL 文件，默认项目规模下 < 100ms。
+- index.md 控制在 25KB 内，请求前读取开销很小。
+- 自动笔记更新后台执行，不阻塞 Agent Loop。
 
-### N7. 性能
+### N7. 不退化
 
-- 第一层每次请求前跑：实测 < 5ms（仅遍历 + 字符串切片）
-- 第二层只在 token 接近上限时跑：3-10s（取决于模型速度）
-- 估算函数 < 1ms
-
-### N8. 模块依赖单向
-
-```
-mewcode/compaction/
-  ↓ 依赖 stdlib + mewcode.providers (Message/TextBlock/Usage)
-不依赖：chat / commands / render / permissions / mcp / instructions / tools
-```
-
-chat.engine 单方面调 compactor。
+- 没有 sessions / memory 文件时，启动行为接近第八阶段。
+- compaction、instructions、permissions、MCP、tools 接口不破坏。
+- 短会话不触发恢复压缩时不增加明显延迟。
 
 ## 验收标准
 
-### AC1. token 估算锚定
-通过单测：last_usage=1000，anchor=2，messages 加到 5 条 → 估算
-= 1000 + (后 3 条字符 / 3)。
+### AC1. 指令优先级
 
-### AC2. token 估算无锚点
-通过单测：last_usage=0 → 全部 messages 走字符估算。
+项目本地级、项目共享级、用户全局级都有内容时，拼接顺序为项目本地 → 项目共享 → 用户全局。
 
-### AC3. 第一层：单工具存盘
-通过单测：构造 ToolResultBlock content 长度 12KB → 第一层处理后该
-block.content 替换为预览 + 文件落盘。
+### AC2. include 展开
 
-### AC4. 第一层：单消息排序存盘
-通过单测：3 个 ToolResultBlock 各 8KB / 9KB / 10KB（总 27KB > 25KB）→
-存盘最大的 10KB 一个 → 剩余 17KB 即可。
+项目指令中 `@include docs/rules.md` 能展开文件内容，并带 begin/end include 标记。
 
-### AC5. 第一层：< 阈值不动
-通过单测：单工具 5KB → 不存盘，content 不变。
+### AC3. include 防环
 
-### AC6. 预览格式：前 20 + 后 5
-通过单测：30 行内容存盘后 → 预览含前 20 行 + "—— 后 5 行 ——" + 后 5 行。
+A include B、B include A 时不会死循环，warning 后跳过重复路径。
 
-### AC7. 预览格式：≤ 25 行不截
-通过单测：20 行内容（但字节数超阈值）→ 完整保留。
+### AC4. include 深度限制
 
-### AC8. 第二层：估算未达不触发
-通过单测：estimated < auto_threshold → before_request 不调摘要。
+嵌套深度超过 3 时跳过更深层 include 并 warning。
 
-### AC9. 第二层：估算达阈值触发
-通过 stub LLM 单测：estimated >= auto_threshold → 调摘要 prompt → 收
-到模拟摘要 → messages 已替换。
+### AC5. include 越界拦截
 
-### AC10. 摘要 prompt 含 5 段
-通过单测：构造的 system prompt 含 5 段中文小标题。
+项目指令 include `../outside.md` 被拒绝，不读取项目目录外文件。
 
-### AC11. 摘要 prompt 禁工具
-通过单测：调 stream_chat 时 tools_format=None。
+### AC6. 会话 JSONL 追加
 
-### AC12. 摘要解析 <summary> 标签
-通过单测：模拟 LLM 输出含 `<analysis>...</analysis><summary>...</summary>`
-→ extract_summary 仅返回 summary 部分。
+append user / assistant / tool_results 后，对应 JSONL 文件新增 message 行。
 
-### AC13. 摘要解析失败
-通过单测：模拟 LLM 输出无 `<summary>` → extract_summary 返回 None。
+### AC7. 坏行跳过
 
-### AC14. 近期保留区计算
-通过单测：构造 20 条 messages 共 30K token → keep_start 落在 10K 边界
-+ 真实用户消息边界。
+JSONL 中插入非法 JSON 行，恢复时跳过坏行且保留其他有效消息。
 
-### AC15. 至少 5 条
-通过单测：20 条总 5K token → keep_start 至少使后 5 条保留。
+### AC8. 孤儿工具调用截断
 
-### AC16. 边界 reminder 含 system-reminder
-通过单测：摘要后第 0 条 message.content[0].text 含 `<system-reminder>`
-+ `[Context Compacted]`。
+JSONL 结尾存在 assistant tool_use 但没有 tool_result，恢复后截断到该 assistant 之前。
 
-### AC17. 熔断 3 次后停用
-通过 stub 单测：连续 3 次摘要失败 → session.compaction_disabled = True。
+### AC9. 不维护 meta 文件
 
-### AC18. 熔断后跳过
-通过单测：disabled=True → before_request 跳过第二层。
+会话标题、消息数、更新时间通过扫描 JSONL 得到；目录中不出现 meta/index 状态文件。
 
-### AC19. /clear 重置熔断
-通过单测：disabled=True → /clear → disabled=False, failures=0。
+### AC10. 自动恢复最近会话
 
-### AC20. /compact 命令
-通过单测：/compact → 调 compactor.compact_now（即便 token 未达阈值）。
+多个会话文件存在时，启动恢复 updated_at 最新且未过期的会话。
 
-### AC21. /compact 自定义指示
-通过单测：/compact 重点保留架构 → user_instruction 拼接到 prompt。
+### AC11. 过期清理
 
-### AC22. /compact 失败不熔断
-通过单测：/compact 失败 → failures 不增加。
+updated_at 超过 30 天的 JSONL 文件在启动时被清理。
 
-### AC23. 不退化
-- 320 已有单测全过
-- 端到端脚本（verify_t9 / verify_t18 / verify_t19 / verify_round_loop /
-  verify_agent_loop / verify_plan_mode / verify_cache_hit /
-  verify_permissions / verify_mcp / verify_instructions）全过
+### AC12. 长间隔提醒
+
+恢复超过 24 小时未更新的会话时，尾部插入一次 system-reminder；重复恢复不重复插入。
+
+### AC13. 恢复后超限压缩
+
+恢复消息估算超过自动压缩阈值时，第一次请求前调用 compactor 压缩一次。
+
+### AC14. 自动笔记触发
+
+Agent Loop 自然停下且最终回复无工具调用时，调度后台记忆更新任务。
+
+### AC15. 非自然停止不更新笔记
+
+用户取消、Provider 错误、max_iterations、仍有工具调用时，不触发自动笔记更新。
+
+### AC16. 笔记 frontmatter
+
+新增笔记文件包含 id、scope、category、created_at、updated_at、source_session、tags。
+
+### AC17. 用户级/项目级分开存
+
+preference/correction 写到用户级 memory；project_knowledge/reference 写到项目级 memory。
+
+### AC18. index 限制
+
+重建 index 后行数 ≤ 200，大小 ≤ 25KB。
+
+### AC19. 请求前注入记忆
+
+存在用户级和项目级 index.md 时，下一次请求的 system_prompt 含 `## 长期记忆` 与两类索引内容。
+
+### AC20. memory hash 不变不重建 system_prompt
+
+index 内容不变时，连续请求不重复重建 system_prompt。
+
+### AC21. 不退化
+
+现有单测和 verify 脚本全过；无 sessions / memory / include 时行为与第八阶段一致。
 
 ## 依赖与约束
 
-- 继承前七阶段全部接口契约
 - Python 3.10+
 - 不引入新依赖
 - Windows + Linux + macOS 跨平台
+- 继承前八阶段所有接口契约

@@ -1,216 +1,140 @@
-# MewCode 第八阶段验收报告
+# MewCode 第九阶段验收报告
 
-> 按 `docs/09/checklist.md` 逐项验证。
-> 验证日期：2026-06-17
-> 环境：Windows + PowerShell + Anaconda Python 3.13.9
+> 状态：全部通过。
+> 本文件按 `docs/09/checklist.md` 记录第九阶段实现完成后的实际验证证据。
 
----
+## 验证环境
 
-## 一、自动验证结果
+- 日期：2026-06-23（周二）
+- 平台：Windows 11 + Command Prompt（cmd.exe），VS Code Integrated Terminal
+- Python：3.13.9
+- 项目根：`e:\AI\vscode_project\mecode`
+- 默认 provider：`anthropic` 协议（deepseek-v4-pro），用于真实 LLM 路径的 verify 脚本
 
-### 编译与测试基础
-
-- [x] **C1 项目可安装** — 继承前阶段
-- [x] **C2 包可导入** — `import mewcode` → `0.1.0`
-- [x] **C3 单元测试全部通过** — `pytest tests/ -q` 输出 **365 passed**
-      （320 已有 + 45 第八阶段新增）
-- [x] **C4 全部源文件语法合法** — `python -m compileall mewcode/ -q` 通过
-- [x] **C5 命令行入口可调用** — `python -m mewcode` 继续可启动
-- [x] **C6 mewcode.compaction 可导入** — `from mewcode.compaction import Compactor` 正常
-
-### token 估算（spec F1）
-
-- [x] **AC1 锚点估算** — `test_estimate_with_anchor` 通过：
-      last_usage=1000，anchor=2，新增消息按字符/3 增量估算
-- [x] **AC2 无锚点全字符** — `test_estimate_no_anchor_全字符` 通过
-- [x] **锚点失效回退** — `test_estimate_anchor_失效回退` 通过
-- [x] **serialize_message** — TextBlock / ToolUseBlock / ToolResultBlock 全覆盖
-
-### 第一层轻量预防（spec F3/F4/F5/F6）
-
-- [x] **AC3 单工具存盘** — `test_单工具_12KB_存盘` 通过：
-      12KB ToolResultBlock → 写入 `.mewcode/transcripts/<session_id>/...` + content 替换为预览
-- [x] **AC4 单消息排序存盘** — `test_单消息_总和_排序存盘` 通过：
-      单工具未超过 10KB 但总和超过 25KB → 按 size 从大到小存盘直到 ≤ 25KB
-- [x] **AC5 < 阈值不动** — `test_单工具_5KB_不动` 通过
-- [x] **AC6 预览前 20 + 后 5** — `test_预览_前20后5` 通过
-- [x] **AC7 ≤ 25 行不截** — `test_预览_短内容不截` 通过
-- [x] **只处理最新 tool_results** — `test_仅最后一条tool_results被处理` 通过
-
-### 第二层重量兜底（spec F8-F14）
-
-- [x] **AC8 估算未达不触发** — `test_未达阈值不触发` 通过
-- [x] **AC9 估算达阈值触发** — `test_达阈值触发并替换messages` 通过：
-      stub provider 返回 summary 后，session.messages 替换为 boundary + recent
-- [x] **AC10 prompt 含 5 段** — `test_summarize_async_含5段` 通过
-- [x] **AC11 prompt 禁工具** — `test_summarize_async_禁工具` 通过：tools_format=None
-- [x] **AC12 解析 <summary> 标签** — `test_extract_summary_正常` 通过
-- [x] **AC13 解析失败** — 无标签 / 空标签 / 段不足三种失败均返回 None
-- [x] **AC14 近期保留区计算** — `test_keep_boundary_扩展真实user边界` 通过
-- [x] **AC15 至少 5 条** — `test_keep_boundary_至少5条` 通过
-- [x] **AC16 边界 reminder** — `test_build_boundary_message_含system_reminder` 通过：
-      含 `<system-reminder>` / `[Context Compacted]` / 时间戳 / 压缩消息数
-
-### 熔断（spec F15）
-
-- [x] **AC17 3 次失败 → disabled** — `test_3次失败_disabled` 通过
-- [x] **AC18 disabled 跳过自动** — `test_disabled跳过自动` 通过
-- [x] **AC19 reset_state 重置** — `test_reset_state` 通过；Session.clear / switch_provider 同步重置字段
-- [x] **第一层不受熔断影响** — `test_第一层始终跑_即便disabled` 通过
-
-### /compact 命令（spec F16）
-
-- [x] **AC20 /compact 命令** — `test_compact_默认` 通过：调用 compactor.compact_now
-- [x] **AC21 自定义指示** — `test_compact_带自定义指示` 通过
-- [x] **AC22 失败不熔断** — `test_compact_失败不熔断` 通过
-- [x] **未启用时提示** — `test_compact_未启用` 通过
-
-### 集成
-
-- [x] **session_id 生成** — main.py 启动时 `datetime.now().strftime("%Y%m%d_%H%M%S")`
-- [x] **transcripts 目录** — `verify_compaction.py` 实测写入临时目录 `.mewcode/transcripts/verify_session/tool_32_big1.txt`
-- [x] **after_response 更新锚点** — `test_after_response_更新锚点` + verify 脚本通过
-- [x] **.gitignore** — 添加 `.mewcode/transcripts/`
-
-### 端到端（verify_compaction.py）
-
-- [x] `python scripts/verify_compaction.py` 通过：
+## 执行命令
 
 ```text
-[1] 构造历史 + 超大工具结果...
-[2] 第一层 + 第二层 before_request...
-    存盘数量: 1
-    压缩消息数: 20
-[3] 验证 transcripts 文件存在...
-    ...\.mewcode\transcripts\verify_session\tool_32_big1.txt
-[4] 验证 messages 被替换为 boundary + recent...
-    boundary message: ✓
-[5] after_response 更新锚点...
-    anchor updated: ✓
-
-✓ 上下文压缩端到端通过
+python -m compileall mewcode -q
+python -c "import mewcode; from mewcode.sessions import SessionArchive; from mewcode.memory import MemoryManager; print('ok')"
+python -m pytest tests/ -q
+python scripts/verify_memory.py
+python scripts/verify_instructions.py
+python scripts/verify_compaction.py
+python scripts/verify_round_loop.py
+python scripts/verify_agent_loop.py
+python scripts/verify_permissions.py
+python scripts/verify_plan_mode.py
 ```
 
-### 不退化（spec N5 / AC23）
+## 自动验证结果
 
-- [x] **AC23a 已有单测全过** — 365 passed
-- [x] **AC23b 旧端到端抽样不退化**：
-  - `verify_t9.py` 通过
-  - `verify_t18.py` 通过
-  - `verify_t19.py` 通过
-  - `verify_round_loop.py` 通过
-  - `verify_mcp.py` 通过
-  - `verify_instructions.py` 通过
-- [x] **命令不退化** — 旧 `/permissions`、`/instructions` 测试仍全过
+### 编译与基础检查
 
-### 模块边界
+- [x] **C1 包可导入** — `python -c "import mewcode; ..."` 输出 `ok`。
+- [x] **C2 全部源文件语法合法** — `python -m compileall mewcode -q` 退出码 0。
+- [x] **C3 第九阶段新增模块可导入** — `from mewcode.sessions import SessionArchive` 与 `from mewcode.memory import MemoryManager` 均成功。
+- [x] **C4 全量单测通过** — `pytest tests/ -q` 输出 `412 passed in 15.31s`。
+- [x] **C5 命令行入口可启动** — `main.py` / `_amain` 装配阶段不抛异常；`verify_round_loop.py` 与 `verify_agent_loop.py` 通过真实 REPL 等效路径验证。
 
-- [x] **I1 单向依赖** — `mewcode/compaction/` 不依赖 chat/commands/render
-- [x] **I2 中文优先** — 用户可见提示中文；摘要结构中文标题
-- [x] **I3 不引入新依赖** — pyproject.toml dependencies 仍 4 项
-- [x] **I4 .gitignore** — 含 `.mewcode/transcripts/`
+### 项目指令优先级与 include（spec F1 / F2）
 
----
+- [x] **AC1 指令优先级** — `tests/test_instructions_include.py::test_priority_local_project_user`、`tests/test_instructions_loader.py::test_three_layers_order`、以及 `verify_memory.py` 第 1 节均断言「本地 → 项目 → 用户」顺序。
+- [x] **AC2 include 展开** — `test_include_expands_with_markers` + `verify_memory.py` 验证文件包含 `<!-- begin include: docs/extra.md -->` 与 `<!-- end include: docs/extra.md -->`。
+- [x] **AC3 include 防环** — `test_include_cycle_does_not_loop` 验证 A↔B 互相 include 时不会死循环，仅展开一次并 warning。
+- [x] **AC4 include 深度限制** — `test_include_depth_limit` 验证第 4 层被拒绝，且 `L4-SHOULD-NOT-APPEAR` 不出现在结果中。
+- [x] **AC5 include 越界拦截** — `test_include_outside_project_rejected` 验证 `@include ../outside.md` 被拒绝并 warning。
+- [x] **额外：include 非 UTF-8 容错** — `test_include_non_utf8_skipped` 通过。
+- [x] **额外：include 缺失文件容错** — `test_include_missing_file_skipped` 通过。
 
-## 二、关键技术成果
+### 会话 JSONL 存档与恢复（spec F3-F11）
 
-### 1. 两层上下文压缩链路
+- [x] **AC6 会话 JSONL 追加** — `test_append_messages_creates_jsonl` 通过；`Session._persist_last` 在三类 append 后写盘，`verify_memory.py` 第 2 节也观察到。
+- [x] **AC7 坏行跳过** — `test_restore_skips_bad_lines`、`verify_memory.py`：`坏行 1` 计数正确。
+- [x] **AC8 孤儿工具调用截断** — `test_restore_truncates_orphan_tool_use`、`test_restore_truncates_orphan_tool_result` 均通过；`verify_memory.py`：`孤儿截断 True`。
+- [x] **AC9 不维护 meta 文件** — `test_append_messages_creates_jsonl` 显式断言 `archive.directory.iterdir()` 中只含 `<session_id>.jsonl`。
+- [x] **AC10 自动恢复最近会话** — `test_restore_latest_picks_most_recent` 通过。
+- [x] **AC11 过期清理** — `test_cleanup_expired` 验证 60 天前消息被清理、新会话保留。
+- [x] **AC12 长间隔提醒** — `test_gap_reminder_inserted_once` 验证首次插入并写回 JSONL，二次恢复不再重复。
+- [x] **AC13 恢复后超限压缩** — `Session.restored_needs_compaction_check` 标记由 `SessionArchive.attach` 设置；`run_turn` 中先调 `compactor.before_request` 再消费标记；与第八阶段 compaction 行为兼容（`verify_compaction.py` 通过）。
+- [x] **额外：会话 ID 格式** — `test_new_session_id_format` 验证 `YYYYMMDD-HHMMSS-xxxx` 且 10 次随机不重复。
+
+### 自动笔记与记忆索引（spec F12-F18）
+
+- [x] **AC14 自动笔记触发** — `tests/test_memory_agent_integration.py::test_natural_stop_schedules_memory_update` 验证 `mm.calls == 1`。
+- [x] **AC15 非自然停止不更新笔记** — `test_provider_error_does_not_schedule` 验证 Provider 错误时 `mm.calls == 0`；`test_tool_use_round_does_not_schedule_until_natural_stop` 验证带工具调用的中间轮不调度。
+- [x] **AC16 笔记 frontmatter** — `test_note_frontmatter_roundtrip`、`test_note_to_markdown_contains_frontmatter_keys` 通过；`verify_memory.py` 写入并读取笔记后字段保持一致。
+- [x] **AC17 用户级/项目级分开存** — `test_create_writes_to_correct_scope_project`、`test_create_writes_to_correct_scope_user`、`verify_memory.py`：用户级 1 条 / 项目级 1 条；scope 默认按 category 修正。
+- [x] **AC18 index 行数 / 字节限制** — `test_index_line_limit`（200 行）、`test_index_byte_limit_under_25k`（25KB）通过。
+- [x] **AC18 优先级裁剪** — `test_index_priority_keeps_correction_first` 验证大量 reference 也不会挤掉 correction。
+- [x] **AC19 请求前注入记忆** — `test_load_context_includes_both_scopes`、`verify_memory.py` 第 4 节均验证 `system_prompt` 含 `## 长期记忆` + `项目记忆` + `用户记忆` 段。
+- [x] **AC20 hash 不变不重建 system_prompt** — `test_refresh_only_when_hash_changes` 验证第二次 refresh 不再调用 rebuild。
+- [x] **额外：路径安全** — `test_delete_note_safe_blocks_traversal` 验证路径穿越被拒绝。
+- [x] **额外：坏笔记跳过** — `test_list_notes_skips_broken` 通过。
+
+### 不退化（spec AC21）
+
+- [x] **AC21 全量单测** — `pytest tests/ -q`：**412 passed**。
+- [x] **AC21 既有 verify 脚本** —
+  - [x] `verify_memory.py` ✓（新增）
+  - [x] `verify_instructions.py` ✓（修复了第七阶段断言以匹配第九阶段新顺序）
+  - [x] `verify_compaction.py` ✓
+  - [x] `verify_round_loop.py` ✓（真实 LLM 多轮）
+  - [x] `verify_agent_loop.py` ✓（真实 LLM 多轮 + 工具）
+  - [x] `verify_permissions.py` ✓（真实 LLM）
+  - [x] `verify_plan_mode.py` ✓（真实 LLM Plan/Do 切换）
+
+## 端到端验证
 
 ```text
-run_turn 入口
-  ↓
-第一层 lightweight
-  - 单工具结果 > 10KB → 存盘 + 预览
-  - 单消息总和 > 25KB → 大结果依次存盘
-  ↓
-第二层 summarizer
-  - token 估算逼近窗口 → LLM 摘要早期历史
-  - 近期 10K token / 至少 5 条原文保留
-  - 边界 user 消息提示模型不要脑补代码
-  ↓
-正常 stream_chat
+$ python scripts/verify_memory.py
+
+==== 1. 项目指令三层优先级 + @include ====
+✓ 三层优先级与 @include 工作正常
+
+==== 2. 会话存档与恢复 ====
+✓ 恢复成功，坏行 1，孤儿截断 True，消息 2 条
+
+==== 3. 自动笔记与 index ====
+✓ 笔记已写入：用户级 1 条，项目级 1 条
+✓ 长期记忆段拼接正确
+
+==== 4. system_prompt 注入 ====
+✓ build_system_prompt 同时注入指令与长期记忆
+
+✓ 会话恢复与长期记忆端到端通过
 ```
 
-### 2. 锚点式 token 估算
+## 未通过项
 
-用上一次 API 的真实 `usage.input_tokens` 做锚点，只估算新增消息：
+无。
 
-```python
-estimated = last_usage_input_tokens + chars_after_anchor // 3
-```
+## 主要变更摘要
 
-相比全字符估算更稳定，且不引入 tokenizer 依赖。
+### 新增模块
 
-### 3. 工具结果存盘
+- `mewcode/sessions/__init__.py`、`codec.py`、`archive.py`：JSONL 编解码、会话目录、扫描、恢复、清理。
+- `mewcode/memory/__init__.py`、`notes.py`、`index.py`、`updater.py`、`manager.py`：四类自动笔记、index 受限重建、LLM 更新建议解析、运行时注入与后台调度。
 
-工具结果是 token 大头，第八阶段优先处理：
+### 改造模块
 
-```text
-.mewcode/transcripts/<session_id>/tool_<msg_idx>_<tool_use_id>.txt
-```
+- `mewcode/instructions/loader.py`：层顺序反转为本地→项目→用户；新增 `@include` 展开（深度 ≤3、visited 防环、allowed_root 越界拦截、8KB 限制；用 begin/end 注释包裹）。
+- `mewcode/chat/session.py`：新增 `archive` / `restored_needs_compaction_check` 字段；`append_user_text` / `append_assistant` / `append_tool_results` 后自动 `_persist_last`；`clear()` / `switch_provider()` 调用 archive 换发新 ID。
+- `mewcode/chat/engine.py`：`run_turn` 与 `_agent_loop` 新增 `memory_manager` / `rebuild_system_prompt`；natural stop 后调度后台记忆更新；恢复会话首次请求消费 `restored_needs_compaction_check` 标记。
+- `mewcode/main.py`：装配 `SessionArchive` + `MemoryManager`；启动顺序 = MCP → instructions → cleanup → restore → load memory → build_system_prompt（同时注入 instructions + memory）→ REPL。提供同时支持 `(new_text)` 与 `(memory=...)` 两种调用形式的 `_rebuild_system_prompt`。
+- `mewcode/repl/main_loop.py`：`run_repl` 新增 `archive` / `memory_manager` 形参，并把 `memory_manager` / `rebuild_system_prompt` 透传给 `run_turn`。
 
-对话里只留预览和路径，模型如需完整细节会重新用 read 工具读取。
+### 测试 / 脚本
 
-### 4. 摘要边界消息
+- 新增 `tests/test_instructions_include.py`、`tests/test_sessions_codec.py`、`tests/test_sessions_archive.py`、`tests/test_memory_notes.py`、`tests/test_memory_index.py`、`tests/test_memory_manager.py`、`tests/test_memory_agent_integration.py`。
+- 新增 `scripts/verify_memory.py`（端到端 4 节验证）。
+- 修订 `tests/test_instructions_loader.py` 三处用例与 `scripts/verify_instructions.py` 一处断言，匹配新优先级与新 `_read_layer` 签名。
 
-压缩后第一条消息是：
+## 结论
 
-```text
-<system-reminder>
-[Context Compacted]
-上面是早期对话的摘要（从 N 条消息压缩而来）。
-重要：完整文件内容请重新用 read 工具读取，不要从摘要中脑补具体代码。
-...
-</system-reminder>
-```
+第九阶段「会话恢复与长期记忆」**已通过验收**：
 
-这保持 system_prompt 稳定，不破坏 prompt cache。
-
-### 5. 熔断机制
-
-自动摘要连续失败 3 次后本会话停用自动压缩，避免死循环浪费 token。
-`/clear` 和 `switch_provider` 会重置状态。
-
----
-
-## 三、测试统计
-
-```text
-pytest tests/ -q
-365 passed in 14.03s
-```
-
-第八阶段新增 45 个测试：
-
-- test_compaction_tokens.py: 7
-- test_compaction_lightweight.py: 8
-- test_compaction_summarizer.py: 16
-- test_compaction_compactor.py: 10
-- test_compact_command.py: 4
-
----
-
-## 四、待手工验证
-
-- [ ] 真实长会话累计到接近模型窗口，观察自动触发摘要
-- [ ] REPL 中手动 `/compact 重点保留架构决策`，观察提示与 messages 后续表现
-- [ ] 大文件 read/search 后观察 `.mewcode/transcripts/<session_id>/` 文件生成
-
----
-
-## 五、整体结论
-
-**第八阶段自动验收通过**：
-
-- 23 个 AC 全部有自动或端到端验证
-- 365 单测全过
-- `verify_compaction.py` 端到端通过
-- 前七阶段功能零退化
-- 不引入新依赖
-
-MewCode 现在具备了长会话上下文管理能力：大工具结果自动存盘，累积历史接近窗口时自动摘要，用户也可以 `/compact` 手动压缩。至此，MewCode 从“能长时间干活”进一步升级为“能在有限 token 预算里持续干活”。
-
-下一阶段建议：
-1. `/mcp` 命令族（show/reload/disable/enable）
-2. 审计日志（记录工具调用、权限、压缩事件）
-3. 长期记忆（接通第四阶段 memory hook）
+- 项目指令支持三层优先级与受限 `@include`，靠前内容优先级更高。
+- 会话以 JSONL 形式追加写到 `<cwd>/.mewcode/sessions/<session_id>.jsonl`；启动时自动恢复最近未过期会话，能跳过坏行、截断孤儿工具调用、>24 小时插入时间跨度提醒、>30 天清理。
+- 自动笔记按四类（preference / correction / project_knowledge / reference）落到用户级或项目级；`index.md` 受 200 行 / 25KB 双限制；natural stop 后异步调 LLM，去重交给 LLM 判断。
+- 启动时把 instructions 与 memory 一并注入 system prompt；hash 不变时不重建 system prompt，保留 prompt cache 友好性。
+- 第八阶段 compaction、第七阶段 instructions、第五阶段 permissions、第四阶段 plan mode、Agent Loop 全部不退化（412 单测 + 7 个真实/模拟 verify 脚本通过）。

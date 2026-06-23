@@ -93,11 +93,13 @@ async def run_turn(
     policy=None,  # PermissionPolicy | None；第五阶段引入，向后兼容
     asker=None,   # PermissionAsker | None；同上
     compactor=None,  # Compactor | None；第八阶段引入
+    memory_manager=None,  # MemoryManager | None；第九阶段引入
+    rebuild_system_prompt=None,  # 第九阶段：记忆刷新时同步重建 system prompt
 ) -> bool:
     """跑一轮对话（Agent Loop 多轮 ReAct 循环）。
 
-    签名与第二阶段兼容（仅新增可选 policy / asker / compactor）——REPL
-    调用方不传时回退到旧版本行为。
+    签名与第二阶段兼容（仅新增可选 policy / asker / compactor / memory_manager）——
+    REPL 调用方不传时回退到旧版本行为。
 
     Args:
         policy: 第五阶段 PermissionPolicy 实例。None 时所有工具调用
@@ -105,6 +107,10 @@ async def run_turn(
         asker:  第五阶段 PermissionAsker 实例。policy 返回 ask 时用此询问。
             policy 不为 None 但 asker 为 None 时，ask 视为 deny（兜底）。
         compactor: 第八阶段 Compactor 实例。None 时不做任何压缩。
+        memory_manager: 第九阶段 MemoryManager 实例。None 时不做记忆注入与
+            自动更新。
+        rebuild_system_prompt: 第九阶段：记忆变化时用于重建 system prompt 的
+            callable（接受 memory=<text> 关键字参数）。
 
     Returns:
         True  —— Loop 正常完成（含自然停止 / 软停止 / 未知工具停止）
@@ -112,17 +118,29 @@ async def run_turn(
     """
     session.append_user_text(user_input)
 
+    # 第九阶段：恢复会话首次请求或本轮请求前——刷新记忆段
+    if memory_manager is not None and rebuild_system_prompt is not None:
+        try:
+            memory_manager.refresh_system_prompt_if_changed(rebuild_system_prompt)
+        except Exception as e:
+            renderer.print_info(f"⚠️ 记忆刷新失败（已忽略）：{e}")
+
     # 第八阶段：请求前压缩（spec F1 全图）
     if compactor is not None:
         try:
             stats = await compactor.before_request(session)
             _emit_compact_stats(renderer, stats)
+            # 第九阶段 F9：恢复后首次请求额外消费一次压缩检查机会
+            if session.restored_needs_compaction_check:
+                session.restored_needs_compaction_check = False
         except Exception as e:
             renderer.print_info(f"⚠️ 压缩阶段异常：{e}")
 
     return await _agent_loop(
         session, renderer, registry, confirmer, sandbox,
         policy=policy, asker=asker, compactor=compactor,
+        memory_manager=memory_manager,
+        rebuild_system_prompt=rebuild_system_prompt,
     )
 
 
@@ -136,6 +154,8 @@ async def _agent_loop(
     policy=None,
     asker=None,
     compactor=None,
+    memory_manager=None,
+    rebuild_system_prompt=None,
 ) -> bool:
     """Agent Loop 主循环。"""
     total_in = 0
@@ -198,6 +218,21 @@ async def _agent_loop(
         if not tool_uses:
             _emit(renderer, Stopped("natural", iteration))
             _emit_usage(renderer, total_in, total_out, total_thinking, iteration)
+            # 第九阶段 F14：natural stop 后调度后台记忆更新
+            if memory_manager is not None:
+                try:
+                    memory_manager.schedule_update(
+                        session,
+                        recent_messages=_recent_messages_for_memory(
+                            session.messages
+                        ),
+                        renderer=renderer,
+                        rebuild_system_prompt=rebuild_system_prompt,
+                    )
+                except Exception as e:
+                    renderer.print_info(
+                        f"⚠️ 记忆更新调度失败（已忽略）：{e}"
+                    )
             return True
 
         # 停止条件 4: 连续未知工具
@@ -691,6 +726,29 @@ def _emit(renderer: Renderer, ev: AgentEvent) -> None:
         renderer.on_agent_event(ev)
     except Exception:
         pass  # UI 渲染失败不影响 Agent 逻辑
+
+
+def _recent_messages_for_memory(messages: list, limit: int = 8) -> list:
+    """截取最近 N 条消息供记忆更新使用（第九阶段 F14）。
+
+    保留最后 limit 条；若开头是 tool_results 这种没有 assistant 配对的
+    碎片，则向后再裁一位避免 LLM 收到不完整片段。
+    """
+    if not messages:
+        return []
+    tail = messages[-limit:]
+    # 简单防御：如果裁剪后第一条是 user tool_results，丢弃它
+    from mewcode.providers import ToolResultBlock as _TRB
+
+    while tail:
+        first = tail[0]
+        if first.role == "user" and any(
+            isinstance(b, _TRB) for b in first.content
+        ):
+            tail = tail[1:]
+            continue
+        break
+    return list(tail)
 
 
 def _emit_compact_stats(renderer: Renderer, stats) -> None:

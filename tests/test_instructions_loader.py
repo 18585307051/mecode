@@ -61,7 +61,7 @@ def test_no_candidates_returns_none(isolated_cwd: Path) -> None:
 
 
 def test_three_layers_order(isolated_cwd: Path) -> None:
-    """三层都有内容 → 顺序为用户→项目→本地（spec AC4）。"""
+    """三层都有内容 → 顺序为本地→项目→用户（spec 第九阶段 F1：高优先级在前）。"""
     home = Path.home()
     (home / ".mewcode" / "AGENTS.md").write_text("USER LEVEL", encoding="utf-8")
     (isolated_cwd / "AGENTS.md").write_text("PROJECT LEVEL", encoding="utf-8")
@@ -74,11 +74,11 @@ def test_three_layers_order(isolated_cwd: Path) -> None:
     text = loader.load_all()
     assert text is not None
 
-    # 顺序验证
+    # 顺序验证（第九阶段反转：本地最先 → 用户最末）
     pos_user = text.index("USER LEVEL")
     pos_project = text.index("PROJECT LEVEL")
     pos_local = text.index("LOCAL LEVEL")
-    assert pos_user < pos_project < pos_local
+    assert pos_local < pos_project < pos_user
 
     # H3 标题验证
     assert "### 用户全局规则" in text
@@ -223,6 +223,7 @@ def test_read_layer_目录不存在(tmp_path: Path) -> None:
         ["AGENTS.md"],
         "项目级",
         "./",
+        tmp_path,
     )
     assert info is None
 
@@ -237,6 +238,7 @@ def test_read_layer_是目录非文件(isolated_cwd: Path) -> None:
         ["AGENTS.md", "CLAUDE.md"],
         "项目级",
         "./",
+        isolated_cwd,
     )
     assert info is not None
     assert info.display_path == "./CLAUDE.md"

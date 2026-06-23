@@ -208,6 +208,13 @@ def main() -> int:
 
         session.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
         compactor = Compactor(cwd=sandbox.cwd)
+
+        # 第九阶段：构造会话存档器与记忆管理器
+        from mewcode.memory import MemoryManager
+        from mewcode.sessions import SessionArchive
+
+        archive = SessionArchive(sandbox.cwd)
+        memory_manager = MemoryManager(sandbox.cwd)
     except Exception:
         renderer.print_exception()
         return 2
@@ -240,6 +247,8 @@ def main() -> int:
                     policy,
                     asker,
                     compactor,
+                    archive,
+                    memory_manager,
                 )
             )
         except KeyboardInterrupt:
@@ -280,8 +289,10 @@ async def _amain(
     policy,
     asker,
     compactor,
+    archive,
+    memory_manager,
 ) -> int:
-    """async 主函数：加载 MCP → 启动 REPL → finally 关闭 MCP。
+    """async 主函数：加载 MCP → 恢复会话 → 启动 REPL → finally 关闭 MCP。
 
     把 MCP 生命周期放在 asyncio 事件循环内管理，避免嵌套 asyncio.run。
     """
@@ -308,7 +319,7 @@ async def _amain(
     except Exception as e:
         renderer.print_info(f"⚠️ MCP 加载阶段异常：{e}")
 
-    # 第七阶段：加载项目指令文件（spec F1-F7）
+    # 第七阶段：加载项目指令文件（spec F1-F7）+ 第九阶段 F1/F2 扩展
     from mewcode.instructions import InstructionsLoader
     from mewcode.system_prompt import build_system_prompt as _rebuild_sp
 
@@ -319,32 +330,92 @@ async def _amain(
     except Exception as e:
         renderer.print_info(f"⚠️ 项目指令加载阶段异常：{e}")
 
-    if instructions_text is not None:
-        # 重新构造 system prompt 注入 custom_instructions（spec F4 / D10）
-        try:
-            sys_prompt = _rebuild_sp(
-                cwd=sandbox.cwd,
-                tools=sorted(t.name for t in registry),
-                custom_instructions=instructions_text,
-            )
-            session.system_prompt = sys_prompt
-        except Exception as e:
-            renderer.print_info(f"⚠️ 项目指令注入 system prompt 失败：{e}")
-        else:
-            # 横幅打印已加载层（spec F7 / AC13）
-            layers = instructions_loader.loaded_layers()
-            parts = [
-                f"{layer.name} ({layer.bytes_len / 1024:.1f}KB)"
-                for layer in layers
-            ]
-            renderer.print_info(f"📋 项目指令: {' + '.join(parts)}")
+    # 第九阶段：恢复最近会话 + 加载长期记忆（spec F6 / F11 / F17）
+    memory_text: str | None = None
+    try:
+        archive.cleanup_expired()
+    except Exception as e:
+        renderer.print_info(f"⚠️ 会话清理失败（已忽略）：{e}")
 
-    # reload callable 给 /instructions reload 用（spec D6）
-    def _rebuild_system_prompt(new_text: str | None) -> None:
+    try:
+        restore = archive.restore_latest()
+        archive.attach(session, restore)
+        if restore.restored:
+            title = (
+                restore.summary.title
+                if restore.summary is not None
+                else "未命名会话"
+            )
+            renderer.print_info(
+                f"💾 已恢复会话: {restore.session_id}"
+                f"（{len(restore.messages)} 条消息，标题：{title}）"
+            )
+            if restore.bad_lines:
+                renderer.print_info(
+                    f"⚠️ 会话恢复跳过 {restore.bad_lines} 行损坏记录"
+                )
+            if restore.truncated:
+                renderer.print_info(
+                    "⚠️ 会话恢复检测到未配对工具调用，已截断到上一条完整消息"
+                )
+            if restore.inserted_gap_reminder:
+                renderer.print_info("🕒 距离上次会话较久，已插入时间跨度提醒")
+    except Exception as e:
+        renderer.print_info(f"⚠️ 会话恢复失败（已忽略）：{e}")
+
+    try:
+        memory_text = memory_manager.load_context().text
+    except Exception as e:
+        renderer.print_info(f"⚠️ 记忆加载失败（已忽略）：{e}")
+
+    # 构造初始 system_prompt：同时注入 instructions + memory
+    try:
         sys_prompt = _rebuild_sp(
             cwd=sandbox.cwd,
             tools=sorted(t.name for t in registry),
-            custom_instructions=new_text,
+            custom_instructions=instructions_text,
+            memory=memory_text,
+        )
+        session.system_prompt = sys_prompt
+    except Exception as e:
+        renderer.print_info(f"⚠️ 构造 system prompt 失败：{e}")
+
+    if instructions_text is not None:
+        # 横幅打印已加载层（spec F7 / AC13）
+        layers = instructions_loader.loaded_layers()
+        parts = [
+            f"{layer.name} ({layer.bytes_len / 1024:.1f}KB)"
+            for layer in layers
+        ]
+        if parts:
+            renderer.print_info(f"📋 项目指令: {' + '.join(parts)}")
+
+    if memory_text:
+        renderer.print_info("🧠 已加载长期记忆索引")
+
+    # reload callable 给 /instructions reload 与记忆刷新共用（spec D6 + 第九阶段 F17）
+    # 同时支持位置参数（兼容第七阶段 /instructions reload 调用）和关键字
+    # memory= 参数（第九阶段 MemoryManager.refresh_system_prompt_if_changed）。
+    state = {
+        "instructions": instructions_text,
+        "memory": memory_text,
+    }
+
+    def _rebuild_system_prompt(
+        new_text: str | None = None,
+        *,
+        memory: str | object = _UNSET,
+    ) -> None:
+        if new_text is not None or memory is _UNSET:
+            # 第七阶段语义：传位置参数 = 重建 instructions 段
+            state["instructions"] = new_text
+        if memory is not _UNSET:
+            state["memory"] = memory  # type: ignore[assignment]
+        sys_prompt = _rebuild_sp(
+            cwd=sandbox.cwd,
+            tools=sorted(t.name for t in registry),
+            custom_instructions=state["instructions"],
+            memory=state["memory"],
         )
         session.system_prompt = sys_prompt
 
@@ -362,6 +433,8 @@ async def _amain(
             instructions=instructions_loader,
             rebuild_system_prompt=_rebuild_system_prompt,
             compactor=compactor,
+            archive=archive,
+            memory_manager=memory_manager,
         )
     finally:
         if mcp_started:
@@ -369,6 +442,10 @@ async def _amain(
                 await mcp_shutdown_all(mcp_started)
             except Exception:
                 pass
+
+
+# 哨兵：用于区分"未传 memory 关键字"和"显式传 memory=None"。
+_UNSET = object()
 
 
 if __name__ == "__main__":

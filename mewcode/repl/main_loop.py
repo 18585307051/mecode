@@ -43,6 +43,8 @@ async def run_repl(
     instructions=None,
     rebuild_system_prompt=None,
     compactor=None,
+    archive=None,
+    memory_manager=None,
 ) -> int:
     """REPL 主循环。
 
@@ -58,6 +60,10 @@ async def run_repl(
         instructions:  第七阶段项目指令加载器（可选）。供 /instructions 命令使用。
         rebuild_system_prompt: 第七阶段：reload 时重建 system prompt 的 callable。
         compactor:  第八阶段上下文压缩器（可选）。供 /compact 与 run_turn 使用。
+        archive:    第九阶段 SessionArchive，目前主要供 Session 自动写盘用，
+            REPL 这一层透传以便后续命令引用。
+        memory_manager: 第九阶段 MemoryManager，run_turn 在 natural stop 后用它
+            调度后台记忆更新。
 
     Returns:
         进程退出码：0 = 正常退出。
@@ -143,6 +149,8 @@ async def run_repl(
                 policy=policy,
                 asker=asker,
                 compactor=compactor,
+                memory_manager=memory_manager,
+                rebuild_system_prompt=rebuild_system_prompt,
             )
         except (KeyboardInterrupt, asyncio.CancelledError):
             # 极端兜底：run_turn 应当自吞，万一漏出来也不让它冒到 main
