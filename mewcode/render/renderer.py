@@ -94,6 +94,11 @@ class Renderer:
                 "prompt": [Command, ...],
             }
         空段不输出。
+
+        每条命令两行展示：
+          /name        描述  (别名: ...)
+                       用法: /name <arg>...
+        usage 字段为空时省略第二行。
         """
         section_titles = [
             ("local", "查询命令（不影响对话状态）"),
@@ -119,6 +124,16 @@ class Renderer:
                     aliases = ", ".join(f"/{a}" for a in cmd.aliases)
                     desc = f"{desc}  [dim](别名: {aliases})[/]"
                 self._console.print(main + desc)
+                # 第二行：用法示例（与命令名对齐到 16 字符的空白缩进下）
+                usage = (cmd.usage or "").strip()
+                if usage and usage != name:
+                    indent = " " * 18  # 与 "  /name<pad>" 起始位置对齐
+                    # rich 把 `[` 视为标记起始符，usage 中常见的 [a|b]
+                    # 必须显式转义为 \[，否则整段 usage 会被吞掉。
+                    safe_usage = usage.replace("[", r"\[")
+                    self._console.print(
+                        f"{indent}[dim]用法: {safe_usage}[/]"
+                    )
 
     def print_status(self, snapshot: dict) -> None:
         """/status 仪表盘输出（spec 第十阶段 F8）。
@@ -221,11 +236,51 @@ class Renderer:
             )
 
     def print_unknown_command(self, name: str, available: list[str]) -> None:
-        """未知命令提示。"""
+        """未知命令提示。
+
+        若用户输入的 name 与某条可见命令相似（前缀匹配或 difflib 相似度
+        高），追加一行 “你是不是想输入: /xxx ？” 的纠错引导。
+        """
         self._console.print(f"[red]未知命令: /{name}[/]")
+
+        # 仅在 name 非空且 available 非空时尝试相似度匹配
+        if name and available:
+            suggestions = self._suggest_commands(name, available)
+            if suggestions:
+                hint = " 或 ".join(f"/{s}" for s in suggestions)
+                self._console.print(f"[yellow]你是不是想输入: {hint} ？[/]")
+
         self._console.print(
             "[dim]可用命令: " + " ".join(f"/{a}" for a in available) + "[/]"
         )
+        self._console.print("[dim]输入 /help 查看完整命令列表与用法。[/]")
+
+    @staticmethod
+    def _suggest_commands(name: str, available: list[str]) -> list[str]:
+        """根据用户的错输 name 找最多 3 条相似命令。
+
+        策略：
+        1. 前缀匹配优先（用户最常见的错是少输几个字符）；
+        2. 退一步用 difflib.get_close_matches 找编辑距离接近的；
+        3. 两类合并、去重、保序、上限 3 条。
+        """
+        import difflib
+
+        name_lc = name.lower()
+        prefix_hits = [a for a in available if a.lower().startswith(name_lc)]
+        fuzzy_hits = difflib.get_close_matches(
+            name_lc, available, n=3, cutoff=0.6,
+        )
+        seen: set[str] = set()
+        out: list[str] = []
+        for c in (*prefix_hits, *fuzzy_hits):
+            if c in seen:
+                continue
+            seen.add(c)
+            out.append(c)
+            if len(out) >= 3:
+                break
+        return out
 
     # ---------- 错误 ----------
 
